@@ -278,7 +278,7 @@ func diskUsageLinux() (uint64, uint64) {
 		if err := syscall.Statfs(mountPoint, &st); err != nil {
 			return
 		}
-		size, used, ok := diskUsageMBFromBlocks(st.Blocks, st.Bfree, st.Bsize)
+		size, used, ok := diskUsageMBFromBlocks(st.Blocks, st.Bfree, int64(st.Bsize))
 		if !ok {
 			return
 		}
