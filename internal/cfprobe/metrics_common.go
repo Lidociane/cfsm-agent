@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -55,6 +56,19 @@ func cpuUsagePercent(prev, current cpuTimes) (float64, bool) {
 	return float64(totalDelta-idleDelta) / float64(totalDelta) * 100, true
 }
 
+func cpuTimesFromPercent(prev cpuTimes, usage float64) cpuTimes {
+	if usage < 0 {
+		usage = 0
+	}
+	if usage > 100 {
+		usage = 100
+	}
+	return cpuTimes{
+		Total: prev.Total + 10000,
+		Idle:  prev.Idle + uint64((100-usage)*100),
+	}
+}
+
 func cpuPercentString(v float64) string {
 	return floatString(v)
 }
@@ -83,6 +97,33 @@ func swapUsedMBFromKB(total, free uint64) uint64 {
 		return 0
 	}
 	return (total - free) / 1024
+}
+
+func shouldIncludeNetInterface(name string, wanted map[string]bool) bool {
+	if isExcludedNetInterface(name) {
+		return false
+	}
+	if len(wanted) == 0 {
+		return true
+	}
+	for pattern := range wanted {
+		if pattern == name {
+			return true
+		}
+		if matched, err := filepath.Match(pattern, name); err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
+func isExcludedNetInterface(name string) bool {
+	for _, prefix := range []string{"br", "cni", "docker", "podman", "flannel", "lo", "veth", "virbr", "vmbr", "tap", "fwbr", "fwpr"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func readSmallFile(path string) string {

@@ -10,7 +10,7 @@
 - `SECRET`：服务器密钥
 - `WORKER_URL`：Worker 上报地址，例如 `https://example.com`
 
-Linux、OpenWrt、Synology DSM、macOS 可使用安装脚本自动下载当前系统对应的最新 release：
+Linux、OpenWrt、Synology DSM、FreeBSD、macOS 可使用安装脚本自动下载当前系统对应的最新 release：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sudo sh -s -- install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
@@ -89,6 +89,7 @@ CF_PROBE_VERSION=v1.0.0 CF_PROBE_GH_PROXY=https://gh-proxy.example.com sh instal
 | --- | --- | --- | --- |
 | Linux / Synology DSM | `/usr/local/bin/cf-probe` | `/etc/config/cf-probe/config.conf` | `/var/log/cf-probe.log` |
 | OpenWrt | `/usr/bin/cf-probe` | `/etc/config/cf-probe/config.conf` | `/var/log/cf-probe.log` |
+| FreeBSD | `/usr/local/bin/cf-probe` | `/etc/config/cf-probe/config.conf` | `/var/log/cf-probe.log` |
 | macOS root 安装 | `/usr/local/bin/cf-probe` | `/usr/local/etc/cf-probe/config.conf` | `/var/log/cf-probe.log` |
 | macOS 用户安装 | `~/.cf-probe/bin/cf-probe` | `~/.cf-probe/config.conf` | `~/Library/Logs/cf-probe.log` |
 | Windows | `C:\Program Files\cf-probe\cf-probe.exe` | `C:\ProgramData\cf-probe\config.conf` | `C:\ProgramData\cf-probe\cf-probe.log` |
@@ -111,6 +112,13 @@ OpenWrt：
 logread -f
 ```
 
+FreeBSD：
+
+```bash
+ps aux | grep cf-probe
+tail -f /var/log/cf-probe.log
+```
+
 macOS：
 
 ```bash
@@ -127,7 +135,7 @@ Get-Content "C:\ProgramData\cf-probe\cf-probe.log" -Wait
 
 ## 卸载
 
-Linux、OpenWrt、Synology DSM、macOS：
+Linux、OpenWrt、Synology DSM、FreeBSD、macOS：
 
 ```bash
 sudo cf-probe uninstall
@@ -153,7 +161,7 @@ sudo cf-probe uninstall -service_name=NAME
 
 ## 从源码构建
 
-需要 Go `1.23` 或更新版本。
+需要 Go `1.24` 或更新版本。
 
 ```bash
 git clone https://github.com/huilang-me/cfsm-agent.git

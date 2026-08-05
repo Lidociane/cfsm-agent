@@ -67,8 +67,8 @@ func Run(configFile string, debug bool, version string) error {
 		version:  version,
 		prevNet:  readNetBytes(cfg.Interface),
 		prevTime: time.Now(),
+		cpuOK:    true,
 	}
-	a.prevCPU, a.cpuOK = readCPUTimes()
 	a.basic = collectBasicStats()
 	a.basicAt = time.Now()
 

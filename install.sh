@@ -41,6 +41,7 @@ detect_os() {
     case "$os" in
         Linux) printf linux ;;
         Darwin) printf darwin ;;
+        FreeBSD) printf freebsd ;;
         MINGW*|MSYS*|CYGWIN*) printf windows ;;
         *) die "unsupported OS: $os" ;;
     esac
@@ -52,15 +53,10 @@ detect_arch() {
         x86_64|amd64) printf amd64 ;;
         aarch64|arm64) printf arm64 ;;
         i386|i686) printf 386 ;;
-        armv5*) printf armv5 ;;
-        armv6*) printf armv6 ;;
-        armv7*|armv8l) printf armv7 ;;
-        mips) printf mips-softfloat ;;
-        mipsel|mipsle) printf mipsle-softfloat ;;
-        mips64) printf mips64 ;;
-        mips64el|mips64le) printf mips64le ;;
+        armv5*) if [ "${os_name:-}" = "freebsd" ]; then printf arm; else printf armv5; fi ;;
+        armv6*) if [ "${os_name:-}" = "freebsd" ]; then printf arm; else printf armv6; fi ;;
+        armv7*|armv8l) if [ "${os_name:-}" = "freebsd" ]; then printf arm; else printf armv7; fi ;;
         loongarch64|loong64) printf loong64 ;;
-        riscv64) printf riscv64 ;;
         *) die "unsupported architecture: $arch" ;;
     esac
 }

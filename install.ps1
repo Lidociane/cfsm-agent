@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $Repo = if ($env:CF_PROBE_REPO) { $env:CF_PROBE_REPO } else { "huilang-me/cfsm-agent" }
 $ServiceName = if ($env:CF_PROBE_SERVICE_NAME) { $env:CF_PROBE_SERVICE_NAME } else { "cf-probe" }

@@ -4,7 +4,6 @@ package cfprobe
 
 import (
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -13,6 +12,13 @@ import (
 )
 
 func readCPUTimes() (cpuTimes, bool) {
+	if times, ok := readGopsutilCPUTimes(); ok {
+		return times, true
+	}
+	return readProcCPUTimes()
+}
+
+func readProcCPUTimes() (cpuTimes, bool) {
 	line := ""
 	_ = scanFile("/proc/stat", func(s string) {
 		if line == "" && strings.HasPrefix(s, "cpu ") {
@@ -224,33 +230,6 @@ func linuxConnCount(name string) int {
 		}
 	})
 	return count
-}
-
-func shouldIncludeNetInterface(name string, wanted map[string]bool) bool {
-	if isExcludedNetInterface(name) {
-		return false
-	}
-	if len(wanted) == 0 {
-		return true
-	}
-	for pattern := range wanted {
-		if pattern == name {
-			return true
-		}
-		if matched, err := filepath.Match(pattern, name); err == nil && matched {
-			return true
-		}
-	}
-	return false
-}
-
-func isExcludedNetInterface(name string) bool {
-	for _, prefix := range []string{"br", "cni", "docker", "podman", "flannel", "lo", "veth", "virbr", "vmbr", "tap", "fwbr", "fwpr"} {
-		if strings.HasPrefix(name, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 type diskUsageEntry struct {

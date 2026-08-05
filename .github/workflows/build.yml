@@ -48,20 +48,20 @@ jobs:
             goarch="$2"
             suffix="$3"
             goarm="${4:-}"
-            gomips="${5:-}"
             output="dist/cf-probe-${goos}-${suffix}"
             if [ "$goos" = "windows" ]; then
               output="${output}.exe"
             fi
             echo "Building ${goos}/${goarch} -> ${output}"
-            GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" GOMIPS="$gomips" CGO_ENABLED=0 \
+            GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" CGO_ENABLED=0 \
               go build -trimpath -ldflags="$LDFLAGS" -o "$output" ./cmd/cf-probe
           }
 
           build_one linux amd64 amd64
           build_one linux arm64 arm64
           build_one linux arm armv7 7
-          build_one linux mips mips-softfloat "" softfloat
+          build_one linux loong64 loong64
+          build_one freebsd amd64 amd64
           build_one darwin arm64 arm64
           build_one windows amd64 amd64
 
