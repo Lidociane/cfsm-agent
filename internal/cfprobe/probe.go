@@ -214,7 +214,7 @@ func measureProbe(target string, count, defaultPort int, log logger) ProbeResult
 	ok := 0
 	values := make([]int, 0, count)
 	for i := 0; i < count; i++ {
-		ms, err := measurePingWithRetries("tcp", target, defaultPingTimeout, defaultPort)
+		ms, err := tcpPing(target, defaultPort, defaultPingTimeout)
 		if err == nil {
 			ok++
 			values = append(values, ms)
@@ -233,12 +233,16 @@ func buildProbeResult(count int, values []int) ProbeResult {
 	if ok == 0 {
 		return ProbeResult{RTTMs: -1, Loss: 100, OK: false}
 	}
+	return ProbeResult{RTTMs: medianInt(values), Loss: (count - ok) * 100 / count, OK: true}
+}
+
+func medianInt(values []int) int {
 	sort.Ints(values)
 	median := values[len(values)/2]
 	if len(values)%2 == 0 {
 		median = (values[len(values)/2-1] + values[len(values)/2]) / 2
 	}
-	return ProbeResult{RTTMs: median, Loss: (count - ok) * 100 / count, OK: true}
+	return median
 }
 
 func measurePing(kind, target string, timeout time.Duration) (int, error) {

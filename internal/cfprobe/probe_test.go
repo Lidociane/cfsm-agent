@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSplitProbeTarget(t *testing.T) {
@@ -141,5 +142,49 @@ func TestBuildProbeResultAllSamplesLost(t *testing.T) {
 	}
 	if got.Loss != 100 {
 		t.Fatalf("Loss = %d, want 100", got.Loss)
+	}
+}
+
+func TestRollingProbeHistoryAggregatesOneMinuteWindow(t *testing.T) {
+	now := time.Unix(1000, 0)
+	history := rollingProbeHistory{}
+	results := []ProbeResult{
+		{RTTMs: 10, Loss: 0, OK: true},
+		{RTTMs: 20, Loss: 0, OK: true},
+		{RTTMs: -1, Loss: 100, OK: false},
+		{RTTMs: 30, Loss: 0, OK: true},
+		{RTTMs: 100, Loss: 0, OK: true},
+		{RTTMs: -1, Loss: 100, OK: false},
+	}
+	for i, result := range results {
+		history.add(now.Add(time.Duration(i)*metricsProbeInterval), "example.com", result)
+	}
+
+	got := history.snapshot(now.Add(5 * metricsProbeInterval))
+	if !got.OK {
+		t.Fatal("expected rolling probe result to be OK")
+	}
+	if got.RTTMs != 25 {
+		t.Fatalf("RTTMs = %d, want 25", got.RTTMs)
+	}
+	if got.Loss != 33 {
+		t.Fatalf("Loss = %d, want 33", got.Loss)
+	}
+}
+
+func TestRollingProbeHistoryKeepsSixSamples(t *testing.T) {
+	now := time.Unix(1000, 0)
+	history := rollingProbeHistory{}
+	history.add(now, "example.com", ProbeResult{RTTMs: -1, Loss: 100, OK: false})
+	for i := 1; i <= 6; i++ {
+		history.add(now.Add(time.Duration(i)*metricsProbeInterval), "example.com", ProbeResult{RTTMs: i * 10, OK: true})
+	}
+
+	got := history.snapshot(now.Add(6 * metricsProbeInterval))
+	if got.Loss != 0 {
+		t.Fatalf("Loss = %d, want 0", got.Loss)
+	}
+	if len(history.samples) != metricsProbeWindowSampleCount {
+		t.Fatalf("samples = %d, want %d", len(history.samples), metricsProbeWindowSampleCount)
 	}
 }

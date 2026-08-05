@@ -39,6 +39,72 @@ type Agent struct {
 	lastReport time.Time
 }
 
+const (
+	metricsProbeInterval          = 10 * time.Second
+	metricsProbeMedianWindow      = time.Minute
+	metricsProbeWindowSampleCount = 6
+	metricsProbeSampleCount       = 1
+)
+
+type timedProbeResult struct {
+	at     time.Time
+	result ProbeResult
+}
+
+type rollingProbeHistory struct {
+	target  string
+	samples []timedProbeResult
+}
+
+func (h *rollingProbeHistory) add(now time.Time, target string, result ProbeResult) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		h.target = ""
+		h.samples = nil
+		return
+	}
+	if h.target != target {
+		h.target = target
+		h.samples = nil
+	}
+	h.samples = append(h.samples, timedProbeResult{at: now, result: result})
+	if len(h.samples) > metricsProbeWindowSampleCount {
+		h.samples = h.samples[len(h.samples)-metricsProbeWindowSampleCount:]
+	}
+}
+
+func (h rollingProbeHistory) snapshot(now time.Time) ProbeResult {
+	if len(h.samples) == 0 {
+		return ProbeResult{}
+	}
+
+	cutoff := now.Add(-metricsProbeMedianWindow)
+	values := make([]int, 0, len(h.samples))
+	for _, sample := range h.samples {
+		if sample.at.Before(cutoff) || !sample.result.OK || sample.result.RTTMs < 0 {
+			continue
+		}
+		values = append(values, sample.result.RTTMs)
+	}
+
+	lossSamples := h.samples
+	if len(lossSamples) > metricsProbeWindowSampleCount {
+		lossSamples = lossSamples[len(lossSamples)-metricsProbeWindowSampleCount:]
+	}
+	lost := 0
+	for _, sample := range lossSamples {
+		if !sample.result.OK {
+			lost++
+		}
+	}
+	loss := lost * 100 / len(lossSamples)
+
+	if len(values) == 0 {
+		return ProbeResult{RTTMs: -1, Loss: loss, OK: false}
+	}
+	return ProbeResult{RTTMs: medianInt(values), Loss: loss, OK: true}
+}
+
 func Run(configFile string, debug bool, version string) error {
 	paths := defaultPaths(serviceNameDefault, "")
 	if configFile != "" {
@@ -271,6 +337,7 @@ func (a *Agent) handleReportResponse(statusCode int, respBody []byte, headers ht
 
 func (a *Agent) networkWorker(ctx context.Context) {
 	var lastIP, lastProbe time.Time
+	var ctHistory, cuHistory, cmHistory, bdHistory rollingProbeHistory
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -286,18 +353,15 @@ func (a *Agent) networkWorker(ctx context.Context) {
 				lastIP = now
 				needUpdate = true
 			}
-			probeInterval := time.Duration(a.cfg.ReportInterval) * time.Second
-			if probeInterval < 30*time.Second {
-				probeInterval = 30 * time.Second
-			}
-			if probeInterval > 60*time.Second {
-				probeInterval = 60 * time.Second
-			}
-			if lastProbe.IsZero() || now.Sub(lastProbe) >= probeInterval {
-				snap.CT = measureProbe(a.cfg.CTNode, 4, defaultMetricsTCPPort, a.log)
-				snap.CU = measureProbe(a.cfg.CUNode, 4, defaultMetricsTCPPort, a.log)
-				snap.CM = measureProbe(a.cfg.CMNode, 4, defaultMetricsTCPPort, a.log)
-				snap.BD = measureProbe(a.cfg.BDNode, 4, defaultMetricsTCPPort, a.log)
+			if lastProbe.IsZero() || now.Sub(lastProbe) >= metricsProbeInterval {
+				ctHistory.add(now, a.cfg.CTNode, measureProbe(a.cfg.CTNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				cuHistory.add(now, a.cfg.CUNode, measureProbe(a.cfg.CUNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				cmHistory.add(now, a.cfg.CMNode, measureProbe(a.cfg.CMNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				bdHistory.add(now, a.cfg.BDNode, measureProbe(a.cfg.BDNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				snap.CT = ctHistory.snapshot(now)
+				snap.CU = cuHistory.snapshot(now)
+				snap.CM = cmHistory.snapshot(now)
+				snap.BD = bdHistory.snapshot(now)
 				lastProbe = now
 				needUpdate = true
 			}
