@@ -27,3 +27,27 @@ func TestNormalizeInterfaceListAllowsGlob(t *testing.T) {
 		t.Fatalf("unexpected normalized interfaces: %q", got)
 	}
 }
+
+func TestConfigPersistsUpdateProxy(t *testing.T) {
+	path := t.TempDir() + "/config.conf"
+	cfg := defaultConfig()
+	cfg.ServerID = "sid"
+	cfg.Secret = "secret"
+	cfg.WorkerURL = "https://worker.example.com/report"
+	cfg.AutoUpdate = true
+	cfg.UpdateProxy = "https://gh-proxy.example.com"
+
+	if err := writeConfig(path, cfg); err != nil {
+		t.Fatalf("writeConfig returned error: %v", err)
+	}
+	got, err := readConfig(path)
+	if err != nil {
+		t.Fatalf("readConfig returned error: %v", err)
+	}
+	if got.UpdateProxy != cfg.UpdateProxy {
+		t.Fatalf("UpdateProxy = %q, want %q", got.UpdateProxy, cfg.UpdateProxy)
+	}
+	if !got.AutoUpdate {
+		t.Fatal("AutoUpdate = false, want true")
+	}
+}

@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-REPO="${CF_PROBE_REPO:-huilang-me/cfsm-agent}"
-GITHUB_PROXY="${CF_PROBE_GH_PROXY:-}"
-INSTALL_VERSION="${CF_PROBE_VERSION:-latest}"
+REPO="huilang-me/cfsm-agent"
+GITHUB_PROXY=""
+INSTALL_VERSION="latest"
 
 log() {
     printf '%s\n' "$*"
@@ -72,6 +72,12 @@ download() {
 run_payload() {
     bin="$1"
     shift
+    case "${cmd:-${1:-install}}" in
+        uninstall|remove|delete|purge)
+            "$bin" "$cmd"
+            return
+            ;;
+    esac
     if [ "$#" -eq 0 ]; then
         "$bin" install
         return
@@ -117,23 +123,9 @@ stage_and_run_payload() {
     return "$rc"
 }
 
-find_installed_binary() {
-    home_dir="${HOME:-}"
-    for p in "/usr/local/bin/cf-probe" "/usr/bin/cf-probe" "$home_dir/.cf-probe/bin/cf-probe"; do
-        if [ -x "$p" ]; then
-            printf '%s' "$p"
-            return 0
-        fi
-    done
-    return 1
-}
-
 cmd="${1:-install}"
 case "$cmd" in
     uninstall|remove|delete|purge)
-        if [ "${CF_PROBE_UNINSTALL_USE_INSTALLED:-0}" = "1" ] && bin="$(find_installed_binary)"; then
-            exec "$bin" "$@"
-        fi
         log "[INFO] downloading temporary uninstaller"
         ;;
 esac
@@ -183,15 +175,6 @@ if ! dir_has_noexec "$tmp_dir"; then
 fi
 
 log "[WARN] cannot execute bootstrap binary from $tmp; trying executable staging directories"
-if [ -n "${CF_PROBE_BOOTSTRAP_DIR:-}" ]; then
-    if stage_and_run_payload "$CF_PROBE_BOOTSTRAP_DIR" "$@"; then
-        exit 0
-    fi
-    status=$?
-    if [ "$status" -ne 125 ] && [ "$status" -ne 126 ]; then
-        exit "$status"
-    fi
-fi
 if [ -n "${HOME:-}" ]; then
     if stage_and_run_payload "$HOME/.cf-probe/tmp" "$@"; then
         exit 0
@@ -211,4 +194,4 @@ for dir in /usr/local/bin /usr/bin /root .; do
     fi
 done
 
-die "downloaded binary could not be executed. /tmp may be mounted noexec; set CF_PROBE_BOOTSTRAP_DIR to an executable directory and retry."
+die "downloaded binary could not be executed. /tmp may be mounted noexec."

@@ -34,16 +34,6 @@ func TestSplitProbeTarget(t *testing.T) {
 	}
 }
 
-func TestWorkerOrigin(t *testing.T) {
-	got, err := workerOrigin("https://worker.example.com/report?id=1")
-	if err != nil {
-		t.Fatalf("workerOrigin returned error: %v", err)
-	}
-	if got != "https://worker.example.com" {
-		t.Fatalf("unexpected origin: %s", got)
-	}
-}
-
 func resetDNSCacheForTest(t *testing.T) {
 	t.Helper()
 	oldLookup := lookupIP

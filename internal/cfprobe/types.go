@@ -24,7 +24,10 @@ type Config struct {
 	Interface       string
 	ResetDay        int
 	AutoUpdate      bool
-	ConfigMD5       string
+	UpdateProxy     string
+	// ConfigMD5 mirrors the worker dynamic config version; local fields like
+	// AutoUpdate and UpdateProxy are intentionally outside that comparison.
+	ConfigMD5 string
 }
 
 type Paths struct {

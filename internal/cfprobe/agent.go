@@ -10,8 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -37,6 +35,7 @@ type Agent struct {
 
 	samples    []map[string]any
 	lastReport time.Time
+	updateMu   sync.Mutex
 }
 
 const (
@@ -140,6 +139,9 @@ func Run(configFile string, debug bool, version string) error {
 		cfg.ServerID, cfg.WorkerURL, cfg.ReportInterval, cfg.CollectInterval, cfg.ResetDay, firstNonEmpty(cfg.Interface, "auto"), cfg.AutoUpdate)
 
 	go a.networkWorker(ctx)
+	if cfg.AutoUpdate {
+		go a.autoUpdateWorker(ctx)
+	}
 	return a.loop(ctx)
 }
 
@@ -456,10 +458,12 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		}
 	}
 	update := values.Get("update")
+	if update != "" && update != "0" && update != "1" {
+		return fmt.Errorf("invalid update %s", update)
+	}
 	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface")
 	if !hasConfig {
-		if update == "1" {
-			a.scheduleAgentUpdate()
+		if values.Has("update") {
 			return nil
 		}
 		return errors.New("no config fields")
@@ -484,9 +488,6 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 	}
 	if values.Get("schema_version") != configSchemaVersion {
 		return fmt.Errorf("invalid schema_version %s", values.Get("schema_version"))
-	}
-	if update != "" && update != "0" && update != "1" {
-		return fmt.Errorf("invalid update %s", update)
 	}
 	if report < collect {
 		return errors.New("report_interval less than collect_interval")
@@ -521,9 +522,6 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 			return err
 		}
 		_ = a.sendCorrectionConfirm(rx, tx)
-	}
-	if update == "1" {
-		a.scheduleAgentUpdate()
 	}
 	return nil
 }
@@ -585,63 +583,4 @@ func parseFloatDefault(raw string, def float64) float64 {
 		return def
 	}
 	return v
-}
-
-func (a *Agent) scheduleAgentUpdate() {
-	if !a.cfg.AutoUpdate {
-		a.log.warnf("auto update ignored: local AUTO_UPDATE=0")
-		return
-	}
-	origin, err := workerOrigin(a.cfg.WorkerURL)
-	if err != nil {
-		a.log.warnf("auto update skipped: %v", err)
-		return
-	}
-	lockFile := filepath.Join(a.paths.ConfigDir, "auto_update.lock")
-	now := time.Now().Unix()
-	if data, err := os.ReadFile(lockFile); err == nil {
-		last := atoi64Default(string(data), 0)
-		if now-last < 1800 {
-			a.log.warnf("auto update already scheduled recently")
-			return
-		}
-	}
-	_ = os.MkdirAll(a.paths.ConfigDir, 0o755)
-	_ = os.WriteFile(lockFile, []byte(strconv.FormatInt(now, 10)), 0o600)
-	if runtime.GOOS == "windows" {
-		scriptURL := origin + "/install.ps1"
-		cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-			fmt.Sprintf("Start-Sleep -Seconds %d; iwr -UseBasicParsing %s | iex", int(autoUpdateDelay.Seconds()), quoteShell(scriptURL)))
-		if err := cmd.Start(); err != nil {
-			a.log.warnf("schedule update failed: %v", err)
-			return
-		}
-		_ = cmd.Process.Release()
-		a.log.info("auto update scheduled after %s", autoUpdateDelay)
-		return
-	}
-	scriptURL := origin + "/install.sh"
-	cmdLine := fmt.Sprintf("sleep %d; curl -fsSL --connect-timeout 5 -m 30 %s | sh -s install",
-		int(autoUpdateDelay.Seconds()), quoteShell(scriptURL))
-	cmd := exec.Command("sh", "-c", cmdLine)
-	if err := cmd.Start(); err != nil {
-		a.log.warnf("schedule update failed: %v", err)
-		return
-	}
-	_ = cmd.Process.Release()
-	a.log.info("auto update scheduled after %s", autoUpdateDelay)
-}
-
-func workerOrigin(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", err
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", errors.New("invalid worker url")
-	}
-	if u.Host == "" {
-		return "", errors.New("invalid worker url host")
-	}
-	return u.Scheme + "://" + u.Host, nil
 }

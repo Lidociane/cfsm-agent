@@ -46,3 +46,33 @@ func TestParseUninstallArgsRejectsExtraArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestParseInstallOptionsAutoUpdateDefaultOff(t *testing.T) {
+	got, err := parseInstallOptions(nil)
+	if err != nil {
+		t.Fatalf("parseInstallOptions(nil) error = %v", err)
+	}
+	if got.AutoUpdate {
+		t.Fatal("AutoUpdate = true, want false")
+	}
+}
+
+func TestParseInstallOptionsAutoUpdateEnabled(t *testing.T) {
+	got, err := parseInstallOptions([]string{"-auto_update=1"})
+	if err != nil {
+		t.Fatalf("parseInstallOptions(-auto_update=1) error = %v", err)
+	}
+	if !got.AutoUpdate {
+		t.Fatal("AutoUpdate = false, want true")
+	}
+}
+
+func TestParseInstallOptionsInstallProxy(t *testing.T) {
+	got, err := parseInstallOptions([]string{"--install-ghproxy=https://gh-proxy.example.com"})
+	if err != nil {
+		t.Fatalf("parseInstallOptions(--install-ghproxy) error = %v", err)
+	}
+	if got.UpdateProxy != "https://gh-proxy.example.com" {
+		t.Fatalf("UpdateProxy = %q", got.UpdateProxy)
+	}
+}

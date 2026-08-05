@@ -108,6 +108,7 @@ func readConfig(path string) (Config, error) {
 	cfg.Interface, _ = normalizeInterfaceList(values["INTERFACE"])
 	cfg.ResetDay = parseIntDefault(values["RESET_DAY"], cfg.ResetDay)
 	cfg.AutoUpdate = values["AUTO_UPDATE"] == "1"
+	cfg.UpdateProxy = strings.TrimSpace(values["UPDATE_PROXY"])
 	cfg.ConfigMD5 = values["CONFIG_MD5"]
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"
@@ -141,6 +142,7 @@ func writeConfig(path string, cfg Config) error {
 	} else {
 		writeKV("AUTO_UPDATE", "0")
 	}
+	writeKV("UPDATE_PROXY", cfg.UpdateProxy)
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"
 	}
@@ -169,6 +171,7 @@ func normalizeConfigIntervals(cfg *Config) {
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"
 	}
+	cfg.UpdateProxy = strings.TrimSpace(cfg.UpdateProxy)
 }
 
 func parseIntDefault(raw string, def int) int {

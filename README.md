@@ -46,12 +46,6 @@ GitHub 下载较慢时，可以配置代理前缀：
 curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sudo sh -s -- install --install-ghproxy=https://gh-proxy.example.com -id=SERVER_ID -secret=SECRET -url=WORKER_URL
 ```
 
-也可以通过环境变量配置：
-
-```bash
-sudo env CF_PROBE_VERSION=v1.0.0 CF_PROBE_GH_PROXY=https://gh-proxy.example.com sh install.sh install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
-```
-
 ## 常用安装参数
 
 | 参数 | 说明 | 默认值 |
@@ -67,13 +61,15 @@ sudo env CF_PROBE_VERSION=v1.0.0 CF_PROBE_GH_PROXY=https://gh-proxy.example.com 
 | `-bd=HOST` | 百度测试节点，可写 `host` 或 `host:port` | 空 |
 | `-interface=IFACES` | 指定统计网卡，多个用英文逗号分隔 | 自动汇总 |
 | `-reset_day=N` | 每月流量重置日，`1-31`；`0` 表示不重置 | `1` |
-| `-auto_update=0|1` | 是否允许远端触发自动更新 | `0` |
+| `-auto_update=0\|1` | 是否开启自动检查更新 | `0` |
 | `-rx_correction=N` | 下行流量校正，单位 GB | 空 |
 | `-tx_correction=N` | 上行流量校正，单位 GB | 空 |
-| `-debug=0|1` | 是否开启调试日志 | `0` |
+| `-debug=0\|1` | 是否开启调试日志 | `0` |
 | `-no_start` | 安装后不立即启动服务 | 不启用 |
 
 再次执行 `install` 时，如果本机已有配置文件且未传入完整的 `-id`、`-secret`、`-url`，程序会沿用已有配置。
+
+自动更新默认关闭。安装时传入 `-auto_update=1` 后，Agent 启动时会检查 GitHub release，之后每 6 小时检查一次；稳定版按版本号更新，`Snapshot-` 版本会跟随最新可用 Snapshot prerelease。自动更新只由本地 `AUTO_UPDATE` 配置控制，不依赖面板返回 `update=1`。如果安装时配置了 `--install-ghproxy`，代理会写入本地配置并用于后续自动更新；该本地字段不参与远端配置 MD5 对比。
 
 ## 安装位置
 
@@ -143,15 +139,6 @@ PowerShell -ExecutionPolicy Bypass -File $script uninstall
 ```
 
 卸载会清理当前 Go 版默认安装创建的固定位置和自启动项，不处理旧脚本或手动放置到其他路径的文件。
-
-| 系统 | 清理内容 |
-| --- | --- |
-| Linux / FreeBSD / Synology DSM | 停止后台进程，删除二进制、`/etc/config/cf-probe`、PID、日志、debug env、`systemd`、OpenRC、`upstart`、Synology rc |
-| OpenWrt | 停止后台进程，删除二进制、`/etc/config/cf-probe`、PID、日志、debug env、`/etc/init.d/cf-probe` 的 `procd` 服务 |
-| macOS | 删除 `/usr/local/bin/cf-probe`、`/usr/local/etc/cf-probe`、PID、日志和系统级 `launchd`；使用 `sudo` 时也会尝试清理当前登录用户的默认用户级残留 |
-| Windows | 停止并删除 Windows 计划任务，删除 `C:\Program Files\cf-probe` 和 `C:\ProgramData\cf-probe`；如 exe 正在运行，会安排延迟删除 |
-
-卸载结束后会检查残留。如果仍有文件或自启动项未删除，会输出 `[WARN] 卸载残留: ...` 并返回失败，按提示路径手动确认即可。
 
 ## 从源码构建
 

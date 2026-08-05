@@ -53,7 +53,7 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs.SetOutput(io.Discard)
 
 	var autoUpdate, debug string
-	var ignoredInstallProxy, ignoredInstallVersion string
+	var ignoredInstallVersion string
 	fs.StringVar(&opts.ServerID, "id", "", "")
 	fs.StringVar(&opts.Secret, "secret", "", "")
 	fs.StringVar(&opts.WorkerURL, "url", "", "")
@@ -73,7 +73,7 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs.StringVar(&opts.RXCorrectionGB, "rx_correction", "", "")
 	fs.StringVar(&opts.TXCorrectionGB, "tx_correction", "", "")
 	fs.StringVar(&debug, "debug", "", "")
-	fs.StringVar(&ignoredInstallProxy, "install-ghproxy", "", "")
+	fs.StringVar(&opts.UpdateProxy, "install-ghproxy", "", "")
 	fs.StringVar(&ignoredInstallVersion, "install-version", "", "")
 	fs.BoolVar(&opts.NoStart, "no_start", false, "")
 	fs.BoolVar(&opts.NoStart, "no-start", false, "")
@@ -137,7 +137,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -ct/-cu/-cm/-bd=HOST 自定义测试节点，可写 host 或 host:port")
 	fmt.Fprintln(w, "  -interface=IFACES    指定网卡，多个用英文逗号分隔")
 	fmt.Fprintln(w, "  -reset_day=N         流量重置日(1-31, 0=不重置)，默认1")
-	fmt.Fprintln(w, "  -auto_update=0|1     允许远端触发自动更新，默认0")
+	fmt.Fprintln(w, "  -auto_update=0|1     开启自动检查更新，默认0")
 	fmt.Fprintln(w, "  -rx_correction=N     下行流量校正(GB)")
 	fmt.Fprintln(w, "  -tx_correction=N     上行流量校正(GB)")
 	fmt.Fprintln(w, "  -debug=0|1           运行调试日志，默认0")

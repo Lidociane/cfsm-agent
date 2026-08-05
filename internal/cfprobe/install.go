@@ -18,9 +18,13 @@ func Install(opts InstallOptions, version string) error {
 
 	existing, existingErr := readConfig(paths.ConfigFile)
 	usingExistingConfig := existingErr == nil && (opts.ServerID == "" || opts.Secret == "" || opts.WorkerURL == "")
+	updateProxy := opts.UpdateProxy
 	if usingExistingConfig {
 		fmt.Printf("[INFO] 检测到已有配置，沿用 %s\n", paths.ConfigFile)
 		opts.Config = existing
+		if updateProxy != "" {
+			opts.UpdateProxy = updateProxy
+		}
 	} else if opts.ServerID == "" || opts.Secret == "" || opts.WorkerURL == "" {
 		printUsage(os.Stderr)
 		return errors.New("运行所需的 -id/-secret/-url 参数不完整")
