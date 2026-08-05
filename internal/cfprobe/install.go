@@ -232,8 +232,8 @@ func startService(paths Paths, debug bool) error {
 func stopService(paths Paths) {
 	switch initSystem() {
 	case "systemd":
-		_ = runCommand("systemctl", "stop", paths.ServiceName+".service")
-		_ = runCommand("systemctl", "disable", paths.ServiceName+".service")
+		_ = runCommandQuiet("systemctl", "stop", paths.ServiceName+".service")
+		_ = runCommandQuiet("systemctl", "disable", paths.ServiceName+".service")
 	case "openrc":
 		_ = runCommand("rc-service", paths.ServiceName, "stop")
 		_ = runCommand("rc-update", "del", paths.ServiceName, "default")
@@ -263,7 +263,7 @@ func removeService(paths Paths) {
 	case "systemd":
 		_ = os.Remove(paths.ServiceFile)
 		_ = runCommand("systemctl", "daemon-reload")
-		_ = runCommand("systemctl", "reset-failed", paths.ServiceName)
+		_ = runCommandQuiet("systemctl", "reset-failed", paths.ServiceName)
 	case "openrc", "procd":
 		_ = os.Remove("/etc/init.d/" + paths.ServiceName)
 	case "launchd":

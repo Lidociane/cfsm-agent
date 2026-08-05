@@ -87,23 +87,41 @@ run_payload() {
     fi
 }
 
+dir_has_noexec() {
+    dir="$1"
+    if command -v findmnt >/dev/null 2>&1; then
+        opts="$(findmnt -no OPTIONS -T "$dir" 2>/dev/null || true)"
+        case ",$opts," in
+            *,noexec,*) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
 stage_and_run_payload() {
     dir="$1"
     shift
     [ -n "$dir" ] || return 125
+    if dir_has_noexec "$dir"; then
+        return 126
+    fi
     mkdir -p "$dir" 2>/dev/null || return 125
     stage="$dir/.cf-probe-bootstrap.$$"
+    stage_err="$stage.err"
     cp "$tmp" "$stage" 2>/dev/null || return 125
     chmod +x "$stage" 2>/dev/null || {
         rm -f "$stage"
         return 125
     }
-    if run_payload "$stage" "$@"; then
+    if run_payload "$stage" "$@" 2>"$stage_err"; then
         rc=0
     else
         rc=$?
+        if [ "$rc" -ne 126 ]; then
+            cat "$stage_err" >&2 2>/dev/null || true
+        fi
     fi
-    rm -f "$stage"
+    rm -f "$stage" "$stage_err"
     return "$rc"
 }
 
@@ -145,8 +163,10 @@ if [ -n "$GITHUB_PROXY" ]; then
     url="${GITHUB_PROXY%/}/$url"
 fi
 
-tmp="${TMPDIR:-/tmp}/cf-probe-bootstrap.$$"
-trap 'rm -f "$tmp"' EXIT INT TERM
+tmp_dir="${TMPDIR:-/tmp}"
+tmp="${tmp_dir%/}/cf-probe-bootstrap.$$"
+tmp_err="$tmp.err"
+trap 'rm -f "$tmp" "$tmp_err"' EXIT INT TERM
 
 log "CF-Server-Monitor Go Probe bootstrap"
 log "  repo    : $REPO"
@@ -158,12 +178,16 @@ log "  url     : $url"
 download "$url" "$tmp"
 chmod +x "$tmp"
 
-if run_payload "$tmp" "$@"; then
-    exit 0
-fi
-status=$?
-if [ "$status" -ne 126 ]; then
-    exit "$status"
+status=126
+if ! dir_has_noexec "$tmp_dir"; then
+    if run_payload "$tmp" "$@" 2>"$tmp_err"; then
+        exit 0
+    fi
+    status=$?
+    if [ "$status" -ne 126 ]; then
+        cat "$tmp_err" >&2 2>/dev/null || true
+        exit "$status"
+    fi
 fi
 
 log "[WARN] cannot execute bootstrap binary from $tmp; trying executable staging directories"
