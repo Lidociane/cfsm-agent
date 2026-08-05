@@ -20,6 +20,8 @@ type gpuMetric struct {
 	ID   string `json:"id"`
 }
 
+const bytesPerMiB = 1024 * 1024
+
 func uintString(v uint64) string {
 	return strconv.FormatUint(v, 10)
 }
@@ -54,13 +56,33 @@ func cpuUsagePercent(prev, current cpuTimes) (float64, bool) {
 }
 
 func cpuPercentString(v float64) string {
-	if v <= 0.001 {
-		v = 0.001
-	}
-	if v > 0 && v < 0.01 {
-		v = 0.01
-	}
 	return floatString(v)
+}
+
+func diskUsageMBFromBlocks(blocks, bfree uint64, bsize int64) (uint64, uint64, bool) {
+	if bsize <= 0 || blocks < bfree {
+		return 0, 0, false
+	}
+	total := blocks * uint64(bsize) / bytesPerMiB
+	used := (blocks - bfree) * uint64(bsize) / bytesPerMiB
+	return total, used, total > 0
+}
+
+func memoryUsedMBFromKB(total, available, free, buffers, cached uint64) uint64 {
+	if available == 0 {
+		available = free + buffers + cached
+	}
+	if total < available {
+		return 0
+	}
+	return (total - available) / 1024
+}
+
+func swapUsedMBFromKB(total, free uint64) uint64 {
+	if total < free {
+		return 0
+	}
+	return (total - free) / 1024
 }
 
 func readSmallFile(path string) string {

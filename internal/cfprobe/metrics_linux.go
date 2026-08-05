@@ -24,11 +24,18 @@ func readCPUTimes() (cpuTimes, bool) {
 		return cpuTimes{}, false
 	}
 	var total uint64
-	for _, f := range fields[1:] {
+	for i, f := range fields[1:] {
+		if i >= 8 {
+			break
+		}
 		n, _ := strconv.ParseUint(f, 10, 64)
 		total += n
 	}
 	idle, _ := strconv.ParseUint(fields[4], 10, 64)
+	if len(fields) > 5 {
+		iowait, _ := strconv.ParseUint(fields[5], 10, 64)
+		idle += iowait
+	}
 	return cpuTimes{Total: total, Idle: idle}, true
 }
 
@@ -93,37 +100,11 @@ func readMemInfo() map[string]uint64 {
 }
 
 func usedMemMB(mem map[string]uint64) uint64 {
-	total := mem["MemTotal"]
-	if total == 0 {
-		return 0
-	}
-	usedDiff := mem["MemFree"] + mem["Cached"] + mem["SReclaimable"] + mem["Buffers"]
-	var used uint64
-	if total >= usedDiff {
-		used = total - usedDiff
-	} else if total >= mem["MemFree"] {
-		used = total - mem["MemFree"]
-	}
-	used += mem["Shmem"]
-	if used > total {
-		used = total
-	}
-	return used / 1024
+	return memoryUsedMBFromKB(mem["MemTotal"], mem["MemAvailable"], mem["MemFree"], mem["Buffers"], mem["Cached"])
 }
 
 func usedSwapMB(mem map[string]uint64) uint64 {
-	total := mem["SwapTotal"]
-	if total == 0 {
-		return 0
-	}
-	deductions := mem["SwapFree"] + mem["SwapCached"]
-	if total >= deductions {
-		return (total - deductions) / 1024
-	}
-	if total >= mem["SwapFree"] {
-		return (total - mem["SwapFree"]) / 1024
-	}
-	return 0
+	return swapUsedMBFromKB(mem["SwapTotal"], mem["SwapFree"])
 }
 
 func linuxLoadAvg() string {
@@ -297,9 +278,8 @@ func diskUsageLinux() (uint64, uint64) {
 		if err := syscall.Statfs(mountPoint, &st); err != nil {
 			return
 		}
-		size := st.Blocks * uint64(st.Bsize) / 1024 / 1024
-		free := st.Bavail * uint64(st.Bsize) / 1024 / 1024
-		if size == 0 || size < free {
+		size, used, ok := diskUsageMBFromBlocks(st.Blocks, st.Bfree, st.Bsize)
+		if !ok {
 			return
 		}
 		deviceID := dev
@@ -308,7 +288,7 @@ func diskUsageLinux() (uint64, uint64) {
 				deviceID = deviceID[:idx]
 			}
 		}
-		entry := diskUsageEntry{total: size, used: size - free}
+		entry := diskUsageEntry{total: size, used: used}
 		if existing, ok := devices[deviceID]; !ok || entry.total > existing.total {
 			devices[deviceID] = entry
 		}
