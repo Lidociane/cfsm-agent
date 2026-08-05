@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-var ifacePartRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
+var ifacePartRE = regexp.MustCompile(`^[A-Za-z0-9_.:\-\*\?\[\]]+$`)
 
 func defaultConfig() Config {
 	return Config{

@@ -41,6 +41,28 @@ func floatString(v float64) string {
 	return strconv.FormatFloat(v, 'f', 2, 64)
 }
 
+func cpuUsagePercent(prev, current cpuTimes) (float64, bool) {
+	if current.Total < prev.Total || current.Idle < prev.Idle {
+		return 0, false
+	}
+	totalDelta := current.Total - prev.Total
+	idleDelta := current.Idle - prev.Idle
+	if totalDelta == 0 || idleDelta > totalDelta {
+		return 0, false
+	}
+	return float64(totalDelta-idleDelta) / float64(totalDelta) * 100, true
+}
+
+func cpuPercentString(v float64) string {
+	if v <= 0.001 {
+		v = 0.001
+	}
+	if v > 0 && v < 0.01 {
+		v = 0.01
+	}
+	return floatString(v)
+}
+
 func readSmallFile(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {

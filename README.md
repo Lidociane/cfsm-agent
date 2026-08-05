@@ -178,3 +178,7 @@ sudo ./cf-probe install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
 ```bash
 ./cf-probe help
 ```
+
+## 致谢
+
+- [komari-agent](https://github.com/komari-monitor/komari-agent)：本项目的部分监控指标统计口径参考了该项目的实现。

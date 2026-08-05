@@ -21,7 +21,7 @@ const (
 	pingHighLatencyRetries  = 3
 	retryDropThresholdTCPMS = 800
 	defaultTaskPingTCPPort  = 80
-	defaultMetricsTCPPort   = 443
+	defaultMetricsTCPPort   = 80
 )
 
 func splitProbeTarget(target string, defaultPort int) (string, int, error) {

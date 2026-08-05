@@ -67,8 +67,8 @@ func Run(configFile string, debug bool, version string) error {
 		version:  version,
 		prevNet:  readNetBytes(cfg.Interface),
 		prevTime: time.Now(),
+		cpuOK:    true,
 	}
-	a.prevCPU, a.cpuOK = readCPUTimes()
 	a.basic = collectBasicStats()
 	a.basicAt = time.Now()
 
@@ -133,10 +133,8 @@ func (a *Agent) tick() {
 
 	cpu := "0.00"
 	if current, ok := readCPUTimes(); ok && a.cpuOK {
-		totalDelta := current.Total - a.prevCPU.Total
-		idleDelta := current.Idle - a.prevCPU.Idle
-		if totalDelta > 0 && idleDelta <= totalDelta {
-			cpu = floatString((1 - float64(idleDelta)/float64(totalDelta)) * 100)
+		if usage, ok := cpuUsagePercent(a.prevCPU, current); ok {
+			cpu = cpuPercentString(usage)
 		}
 		a.prevCPU = current
 	} else {
@@ -304,10 +302,10 @@ func (a *Agent) networkWorker(ctx context.Context) {
 				probeInterval = 60 * time.Second
 			}
 			if lastProbe.IsZero() || now.Sub(lastProbe) >= probeInterval {
-				snap.CT = measureProbe(a.cfg.CTNode, 4, 443, a.log)
-				snap.CU = measureProbe(a.cfg.CUNode, 4, 443, a.log)
-				snap.CM = measureProbe(a.cfg.CMNode, 4, 443, a.log)
-				snap.BD = measureProbe(a.cfg.BDNode, 4, 443, a.log)
+				snap.CT = measureProbe(a.cfg.CTNode, 4, defaultMetricsTCPPort, a.log)
+				snap.CU = measureProbe(a.cfg.CUNode, 4, defaultMetricsTCPPort, a.log)
+				snap.CM = measureProbe(a.cfg.CMNode, 4, defaultMetricsTCPPort, a.log)
+				snap.BD = measureProbe(a.cfg.BDNode, 4, defaultMetricsTCPPort, a.log)
 				lastProbe = now
 				needUpdate = true
 			}
@@ -362,7 +360,7 @@ func getCFTraceIP(network string) string {
 	return "0"
 }
 
-var remoteBodyRE = regexp.MustCompile(`^[A-Za-z0-9_=&.,:%+\-\[\]]*$`)
+var remoteBodyRE = regexp.MustCompile(`^[A-Za-z0-9_=&.,:%+\-\*\?\[\]]*$`)
 
 func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 	if len(body) == 0 {

@@ -77,6 +77,36 @@ download() {
     fi
 }
 
+run_payload() {
+    bin="$1"
+    shift
+    if [ "$#" -eq 0 ]; then
+        "$bin" install
+    else
+        "$bin" "$@"
+    fi
+}
+
+stage_and_run_payload() {
+    dir="$1"
+    shift
+    [ -n "$dir" ] || return 125
+    mkdir -p "$dir" 2>/dev/null || return 125
+    stage="$dir/.cf-probe-bootstrap.$$"
+    cp "$tmp" "$stage" 2>/dev/null || return 125
+    chmod +x "$stage" 2>/dev/null || {
+        rm -f "$stage"
+        return 125
+    }
+    if run_payload "$stage" "$@"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    rm -f "$stage"
+    return "$rc"
+}
+
 find_installed_binary() {
     home_dir="${HOME:-}"
     for p in "/usr/local/bin/$SERVICE_NAME" "/usr/bin/$SERVICE_NAME" "$home_dir/.cf-probe/bin/$SERVICE_NAME"; do
@@ -128,7 +158,41 @@ log "  url     : $url"
 download "$url" "$tmp"
 chmod +x "$tmp"
 
-if [ "$#" -eq 0 ]; then
-    exec "$tmp" install
+if run_payload "$tmp" "$@"; then
+    exit 0
 fi
-exec "$tmp" "$@"
+status=$?
+if [ "$status" -ne 126 ]; then
+    exit "$status"
+fi
+
+log "[WARN] cannot execute bootstrap binary from $tmp; trying executable staging directories"
+if [ -n "${CF_PROBE_BOOTSTRAP_DIR:-}" ]; then
+    if stage_and_run_payload "$CF_PROBE_BOOTSTRAP_DIR" "$@"; then
+        exit 0
+    fi
+    status=$?
+    if [ "$status" -ne 125 ] && [ "$status" -ne 126 ]; then
+        exit "$status"
+    fi
+fi
+if [ -n "${HOME:-}" ]; then
+    if stage_and_run_payload "$HOME/.cf-probe/tmp" "$@"; then
+        exit 0
+    fi
+    status=$?
+    if [ "$status" -ne 125 ] && [ "$status" -ne 126 ]; then
+        exit "$status"
+    fi
+fi
+for dir in /usr/local/bin /usr/bin /root .; do
+    if stage_and_run_payload "$dir" "$@"; then
+        exit 0
+    fi
+    status=$?
+    if [ "$status" -ne 125 ] && [ "$status" -ne 126 ]; then
+        exit "$status"
+    fi
+done
+
+die "downloaded binary could not be executed. /tmp may be mounted noexec; set CF_PROBE_BOOTSTRAP_DIR to an executable directory and retry."

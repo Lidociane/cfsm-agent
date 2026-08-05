@@ -4,6 +4,7 @@ package cfprobe
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -28,10 +29,6 @@ func readCPUTimes() (cpuTimes, bool) {
 		total += n
 	}
 	idle, _ := strconv.ParseUint(fields[4], 10, 64)
-	if len(fields) > 5 {
-		iowait, _ := strconv.ParseUint(fields[5], 10, 64)
-		idle += iowait
-	}
 	return cpuTimes{Total: total, Idle: idle}, true
 }
 
@@ -72,11 +69,7 @@ func readNetBytes(ifaces string) NetBytes {
 		if len(fields) < 16 {
 			return
 		}
-		if len(wanted) > 0 {
-			if !wanted[name] {
-				return
-			}
-		} else if !isDefaultNetInterface(name) {
+		if !shouldIncludeNetInterface(name, wanted) {
 			return
 		}
 		rx, _ := strconv.ParseUint(fields[0], 10, 64)
@@ -101,23 +94,36 @@ func readMemInfo() map[string]uint64 {
 
 func usedMemMB(mem map[string]uint64) uint64 {
 	total := mem["MemTotal"]
-	avail := mem["MemAvailable"]
-	if avail == 0 {
-		avail = mem["MemFree"] + mem["Buffers"] + mem["Cached"]
-	}
-	if total < avail {
+	if total == 0 {
 		return 0
 	}
-	return (total - avail) / 1024
+	usedDiff := mem["MemFree"] + mem["Cached"] + mem["SReclaimable"] + mem["Buffers"]
+	var used uint64
+	if total >= usedDiff {
+		used = total - usedDiff
+	} else if total >= mem["MemFree"] {
+		used = total - mem["MemFree"]
+	}
+	used += mem["Shmem"]
+	if used > total {
+		used = total
+	}
+	return used / 1024
 }
 
 func usedSwapMB(mem map[string]uint64) uint64 {
 	total := mem["SwapTotal"]
-	free := mem["SwapFree"]
-	if total < free {
+	if total == 0 {
 		return 0
 	}
-	return (total - free) / 1024
+	deductions := mem["SwapFree"] + mem["SwapCached"]
+	if total >= deductions {
+		return (total - deductions) / 1024
+	}
+	if total >= mem["SwapFree"] {
+		return (total - mem["SwapFree"]) / 1024
+	}
+	return 0
 }
 
 func linuxLoadAvg() string {
@@ -239,23 +245,52 @@ func linuxConnCount(name string) int {
 	return count
 }
 
-func isDefaultNetInterface(name string) bool {
-	if name == "lo" || strings.HasPrefix(name, "docker") || strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "veth") {
+func shouldIncludeNetInterface(name string, wanted map[string]bool) bool {
+	if isExcludedNetInterface(name) {
 		return false
 	}
-	return strings.HasPrefix(name, "eth") || strings.HasPrefix(name, "en") || strings.HasPrefix(name, "wl") || strings.HasPrefix(name, "ppp") || strings.HasPrefix(name, "wan") || strings.HasPrefix(name, "lan")
+	if len(wanted) == 0 {
+		return true
+	}
+	for pattern := range wanted {
+		if pattern == name {
+			return true
+		}
+		if matched, err := filepath.Match(pattern, name); err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
+func isExcludedNetInterface(name string) bool {
+	for _, prefix := range []string{"br", "cni", "docker", "podman", "flannel", "lo", "veth", "virbr", "vmbr", "tap", "fwbr", "fwpr"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+type diskUsageEntry struct {
+	total uint64
+	used  uint64
 }
 
 func diskUsageLinux() (uint64, uint64) {
-	seen := map[string]bool{}
-	var total, used uint64
+	devices := map[string]diskUsageEntry{}
 	_ = scanFile("/proc/mounts", func(line string) {
 		fields := strings.Fields(line)
 		if len(fields) < 3 {
 			return
 		}
 		dev, mountPoint, fsType := fields[0], fields[1], fields[2]
-		if seen[dev] || !includeLinuxMount(dev, mountPoint, fsType) {
+		opts := ""
+		if len(fields) >= 4 {
+			opts = fields[3]
+		}
+		mountPoint = unescapeLinuxMountPoint(mountPoint)
+		if !includeLinuxMount(dev, mountPoint, fsType, opts) {
 			return
 		}
 		var st syscall.Statfs_t
@@ -267,23 +302,57 @@ func diskUsageLinux() (uint64, uint64) {
 		if size == 0 || size < free {
 			return
 		}
-		seen[dev] = true
-		total += size
-		used += size - free
+		deviceID := dev
+		if strings.ToLower(fsType) == "zfs" {
+			if idx := strings.Index(deviceID, "/"); idx != -1 {
+				deviceID = deviceID[:idx]
+			}
+		}
+		entry := diskUsageEntry{total: size, used: size - free}
+		if existing, ok := devices[deviceID]; !ok || entry.total > existing.total {
+			devices[deviceID] = entry
+		}
 	})
+	var total, used uint64
+	for _, entry := range devices {
+		total += entry.total
+		used += entry.used
+	}
 	return total, used
 }
 
-func includeLinuxMount(dev, mountPoint, fsType string) bool {
-	if strings.HasPrefix(mountPoint, "/proc") || strings.HasPrefix(mountPoint, "/sys") || strings.HasPrefix(mountPoint, "/dev") || strings.HasPrefix(mountPoint, "/run") {
-		return false
-	}
-	switch fsType {
-	case "tmpfs", "devtmpfs", "proc", "sysfs", "cgroup", "cgroup2", "squashfs", "overlay", "nsfs", "autofs", "debugfs", "tracefs":
-		return false
-	}
-	if strings.HasPrefix(dev, "/dev/") || dev == "rootfs" {
+func includeLinuxMount(dev, mountPoint, fsType, opts string) bool {
+	if mountPoint == "/" {
 		return true
 	}
-	return false
+	mountPointLower := strings.ToLower(mountPoint)
+	for _, prefix := range []string{"/tmp", "/var/tmp", "/dev", "/run", "/var/lib/containers", "/var/lib/docker", "/proc", "/sys", "/sys/fs/cgroup", "/etc/resolv.conf", "/etc/host", "/nix/store"} {
+		if mountPointLower == prefix || strings.HasPrefix(mountPointLower, prefix) {
+			return false
+		}
+	}
+	fsTypeLower := strings.ToLower(fsType)
+	if fsTypeLower == "autofs" && !strings.HasPrefix(dev, "/dev/") {
+		return false
+	}
+	if fsTypeLower == "fuseblk" {
+		return true
+	}
+	for _, excluded := range []string{"tmpfs", "devtmpfs", "udev", "nfs", "cifs", "smb", "vboxsf", "9p", "fuse", "overlay", "proc", "devpts", "sysfs", "cgroup", "mqueue", "hugetlbfs", "debugfs", "binfmt_misc", "securityfs"} {
+		if fsTypeLower == excluded || strings.HasPrefix(fsTypeLower, excluded) {
+			return false
+		}
+	}
+	optsLower := strings.ToLower(opts)
+	if strings.Contains(optsLower, "remote") || strings.Contains(optsLower, "network") {
+		return false
+	}
+	if strings.HasPrefix(dev, "/dev/loop") {
+		return false
+	}
+	return true
+}
+
+func unescapeLinuxMountPoint(path string) string {
+	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(path)
 }

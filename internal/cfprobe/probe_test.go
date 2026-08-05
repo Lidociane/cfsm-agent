@@ -13,14 +13,14 @@ func TestSplitProbeTarget(t *testing.T) {
 		wantHost string
 		wantPort int
 	}{
-		{name: "host default", target: "example.com", wantHost: "example.com", wantPort: 443},
+		{name: "host default", target: "example.com", wantHost: "example.com", wantPort: defaultMetricsTCPPort},
 		{name: "host port", target: "example.com:8443", wantHost: "example.com", wantPort: 8443},
 		{name: "ipv6 bracket", target: "[2001:db8::1]:443", wantHost: "2001:db8::1", wantPort: 443},
-		{name: "ipv6 default", target: "2001:db8::1", wantHost: "2001:db8::1", wantPort: 443},
+		{name: "ipv6 default", target: "2001:db8::1", wantHost: "2001:db8::1", wantPort: defaultMetricsTCPPort},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			host, port, err := splitProbeTarget(tt.target, 443)
+			host, port, err := splitProbeTarget(tt.target, defaultMetricsTCPPort)
 			if err != nil {
 				t.Fatalf("splitProbeTarget returned error: %v", err)
 			}

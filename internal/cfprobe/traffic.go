@@ -48,12 +48,13 @@ func writeTrafficState(path string, st trafficState) error {
 }
 
 func calcMonthlyTraffic(path string, current NetBytes, resetDay int, iface string) (uint64, uint64) {
-	now := time.Now().Unix()
+	nowTime := time.Now()
+	now := nowTime.Unix()
 	st := readTrafficState(path)
 	if st.Interface != iface {
 		st = trafficState{}
 	}
-	periodStart := periodStartTS(time.Unix(now, 0).UTC(), resetDay)
+	periodStart := periodStartTS(nowTime, resetDay)
 	if st.LastCheck == 0 {
 		st.RXPrev = current.RX
 		st.TXPrev = current.TX
@@ -111,28 +112,40 @@ func periodStartTS(now time.Time, resetDay int) int64 {
 		return 0
 	}
 	if resetDay < 1 || resetDay > 31 {
-		resetDay = 1
+		return now.Unix()
 	}
-	year, month, day := now.Date()
-	startDay := clampDay(year, month, resetDay)
-	start := time.Date(year, month, startDay, 0, 0, 0, 0, time.UTC)
-	if day < startDay {
-		prev := now.AddDate(0, -1, 0)
-		py, pm, _ := prev.Date()
-		start = time.Date(py, pm, clampDay(py, pm, resetDay), 0, 0, 0, 0, time.UTC)
-	}
-	return start.Unix()
+	return lastResetDate(now, resetDay).Unix()
 }
 
-func clampDay(year int, month time.Month, day int) int {
-	last := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
-	if day > last {
-		return last
+func lastResetDate(now time.Time, resetDay int) time.Time {
+	year, month, _ := now.Date()
+	loc := now.Location()
+	thisMonth := actualResetDate(year, month, resetDay, loc)
+	if !now.Before(thisMonth) {
+		return thisMonth
 	}
-	if day < 1 {
-		return 1
+	prevMonth := month - 1
+	prevYear := year
+	if prevMonth < time.January {
+		prevMonth = time.December
+		prevYear--
 	}
-	return day
+	return actualResetDate(prevYear, prevMonth, resetDay, loc)
+}
+
+func actualResetDate(year int, month time.Month, resetDay int, loc *time.Location) time.Time {
+	firstDayOfNextMonth := time.Date(year, month+1, 1, 0, 0, 0, 0, loc)
+	lastDayOfMonth := firstDayOfNextMonth.AddDate(0, 0, -1).Day()
+	if resetDay <= lastDayOfMonth {
+		return time.Date(year, month, resetDay, 0, 0, 0, 0, loc)
+	}
+	nextMonth := month + 1
+	nextYear := year
+	if nextMonth > time.December {
+		nextMonth = time.January
+		nextYear++
+	}
+	return time.Date(nextYear, nextMonth, 1, 0, 0, 0, 0, loc)
 }
 
 func parseUintDefault(raw string, def uint64) uint64 {

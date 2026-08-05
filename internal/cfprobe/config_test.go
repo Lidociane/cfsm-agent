@@ -17,3 +17,13 @@ func TestNormalizeInterfaceListRejectsBadName(t *testing.T) {
 		t.Fatal("expected invalid interface name to be rejected")
 	}
 }
+
+func TestNormalizeInterfaceListAllowsGlob(t *testing.T) {
+	got, err := normalizeInterfaceList(" eth*,en[ops]* ")
+	if err != nil {
+		t.Fatalf("normalizeInterfaceList returned error: %v", err)
+	}
+	if got != "eth*,en[ops]*" {
+		t.Fatalf("unexpected normalized interfaces: %q", got)
+	}
+}
