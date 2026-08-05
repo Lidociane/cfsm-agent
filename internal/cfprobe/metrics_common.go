@@ -56,19 +56,6 @@ func cpuUsagePercent(prev, current cpuTimes) (float64, bool) {
 	return float64(totalDelta-idleDelta) / float64(totalDelta) * 100, true
 }
 
-func cpuTimesFromPercent(prev cpuTimes, usage float64) cpuTimes {
-	if usage < 0 {
-		usage = 0
-	}
-	if usage > 100 {
-		usage = 100
-	}
-	return cpuTimes{
-		Total: prev.Total + 10000,
-		Idle:  prev.Idle + uint64((100-usage)*100),
-	}
-}
-
 func cpuPercentString(v float64) string {
 	return floatString(v)
 }

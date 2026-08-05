@@ -7,10 +7,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	gopsutilCPU "github.com/shirou/gopsutil/v4/cpu"
 )
 
-func readCPUTimes() (cpuTimes, bool) {
-	return cpuTimes{}, false
+func readCPUPercent() (float64, bool) {
+	percentages, err := gopsutilCPU.Percent(0, false)
+	if err != nil || len(percentages) == 0 {
+		return 0, false
+	}
+	return percentages[0], true
 }
 
 func collectBasicStats() BasicStats {

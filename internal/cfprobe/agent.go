@@ -34,8 +34,6 @@ type Agent struct {
 	basicAt  time.Time
 	prevNet  NetBytes
 	prevTime time.Time
-	prevCPU  cpuTimes
-	cpuOK    bool
 
 	samples    []map[string]any
 	lastReport time.Time
@@ -67,7 +65,6 @@ func Run(configFile string, debug bool, version string) error {
 		version:  version,
 		prevNet:  readNetBytes(cfg.Interface),
 		prevTime: time.Now(),
-		cpuOK:    true,
 	}
 	a.basic = collectBasicStats()
 	a.basicAt = time.Now()
@@ -132,13 +129,8 @@ func (a *Agent) tick() {
 	a.prevTime = now
 
 	cpu := "0.00"
-	if current, ok := readCPUTimes(); ok && a.cpuOK {
-		if usage, ok := cpuUsagePercent(a.prevCPU, current); ok {
-			cpu = cpuPercentString(usage)
-		}
-		a.prevCPU = current
-	} else {
-		a.prevCPU, a.cpuOK = readCPUTimes()
+	if usage, ok := readCPUPercent(); ok {
+		cpu = cpuPercentString(usage)
 	}
 
 	rxMonthly, txMonthly := calcMonthlyTraffic(a.paths.TrafficFile, netNow, a.cfg.ResetDay, a.cfg.Interface)

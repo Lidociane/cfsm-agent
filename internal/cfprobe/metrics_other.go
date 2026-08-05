@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-func readCPUTimes() (cpuTimes, bool) {
-	return cpuTimes{}, false
+func readCPUPercent() (float64, bool) {
+	return 0, false
 }
 
 func collectBasicStats() BasicStats {

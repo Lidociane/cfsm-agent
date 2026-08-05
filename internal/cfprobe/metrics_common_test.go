@@ -12,18 +12,6 @@ func TestCPUUsagePercentFromZeroPrevious(t *testing.T) {
 	}
 }
 
-func TestCPUTimesFromPercentPreservesUsage(t *testing.T) {
-	prev := cpuTimesFromPercent(cpuTimes{}, 25)
-	current := cpuTimesFromPercent(prev, 5)
-	got, ok := cpuUsagePercent(prev, current)
-	if !ok {
-		t.Fatal("expected cpu usage to calculate from synthetic samples")
-	}
-	if got != 5 {
-		t.Fatalf("got %.2f, want 5", got)
-	}
-}
-
 func TestCPUPercentStringReportsZeroAsZero(t *testing.T) {
 	if got := cpuPercentString(0); got != "0.00" {
 		t.Fatalf("got %q, want 0.00", got)

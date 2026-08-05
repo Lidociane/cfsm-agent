@@ -13,23 +13,20 @@ import (
 )
 
 var (
-	darwinCPUMu       sync.Mutex
-	darwinCPUTotal    uint64
-	darwinCPUIdle     uint64
 	darwinGPUNameOnce sync.Once
 	darwinGPUNames    []string
 	darwinHWOnce      sync.Once
 	darwinHW          map[string]string
 )
 
-func readCPUTimes() (cpuTimes, bool) {
+func readCPUPercent() (float64, bool) {
 	if usage, ok := darwinTopCPUPercent(); ok {
-		return darwinSyntheticCPUTimes(usage), true
+		return usage, true
 	}
 	if usage, ok := darwinPSCPUPercent(); ok {
-		return darwinSyntheticCPUTimes(usage), true
+		return usage, true
 	}
-	return cpuTimes{}, false
+	return 0, false
 }
 
 func collectBasicStats() BasicStats {
@@ -54,20 +51,6 @@ func collectBasicStats() BasicStats {
 		TCPConn:     darwinConnCount("tcp"),
 		UDPConn:     darwinConnCount("udp"),
 	}
-}
-
-func darwinSyntheticCPUTimes(usage float64) cpuTimes {
-	if usage < 0 {
-		usage = 0
-	}
-	if usage > 100 {
-		usage = 100
-	}
-	darwinCPUMu.Lock()
-	defer darwinCPUMu.Unlock()
-	darwinCPUTotal += 10000
-	darwinCPUIdle += uint64((100 - usage) * 100)
-	return cpuTimes{Total: darwinCPUTotal, Idle: darwinCPUIdle}
 }
 
 func darwinTopCPUPercent() (float64, bool) {

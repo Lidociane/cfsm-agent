@@ -3,24 +3,13 @@
 package cfprobe
 
 import (
-	"sync"
-
 	gopsutilCPU "github.com/shirou/gopsutil/v4/cpu"
 )
 
-var (
-	linuxCPUMu    sync.Mutex
-	linuxCPUTimes cpuTimes
-)
-
-func readGopsutilCPUTimes() (cpuTimes, bool) {
+func readGopsutilCPUPercent() (float64, bool) {
 	percentages, err := gopsutilCPU.Percent(0, false)
 	if err != nil || len(percentages) == 0 {
-		return cpuTimes{}, false
+		return 0, false
 	}
-
-	linuxCPUMu.Lock()
-	defer linuxCPUMu.Unlock()
-	linuxCPUTimes = cpuTimesFromPercent(linuxCPUTimes, percentages[0])
-	return linuxCPUTimes, true
+	return percentages[0], true
 }

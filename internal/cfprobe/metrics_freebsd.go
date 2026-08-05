@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	gopsutilCPU "github.com/shirou/gopsutil/v4/cpu"
@@ -18,20 +17,12 @@ import (
 	gopsutilNet "github.com/shirou/gopsutil/v4/net"
 )
 
-var (
-	freebsdCPUMu    sync.Mutex
-	freebsdCPUTimes cpuTimes
-)
-
-func readCPUTimes() (cpuTimes, bool) {
+func readCPUPercent() (float64, bool) {
 	percentages, err := gopsutilCPU.Percent(0, false)
 	if err != nil || len(percentages) == 0 {
-		return cpuTimes{}, false
+		return 0, false
 	}
-	freebsdCPUMu.Lock()
-	defer freebsdCPUMu.Unlock()
-	freebsdCPUTimes = cpuTimesFromPercent(freebsdCPUTimes, percentages[0])
-	return freebsdCPUTimes, true
+	return percentages[0], true
 }
 
 func collectBasicStats() BasicStats {

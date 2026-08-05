@@ -11,11 +11,27 @@ import (
 	"time"
 )
 
-func readCPUTimes() (cpuTimes, bool) {
-	if times, ok := readGopsutilCPUTimes(); ok {
-		return times, true
+var (
+	procCPUTimes cpuTimes
+	procCPUOK    bool
+)
+
+func readCPUPercent() (float64, bool) {
+	if usage, ok := readGopsutilCPUPercent(); ok {
+		return usage, true
 	}
-	return readProcCPUTimes()
+	current, ok := readProcCPUTimes()
+	if !ok {
+		return 0, false
+	}
+	if !procCPUOK {
+		procCPUTimes = current
+		procCPUOK = true
+		return 0, false
+	}
+	usage, ok := cpuUsagePercent(procCPUTimes, current)
+	procCPUTimes = current
+	return usage, ok
 }
 
 func readProcCPUTimes() (cpuTimes, bool) {
