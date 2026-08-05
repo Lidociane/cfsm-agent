@@ -48,8 +48,6 @@ type InstallOptions struct {
 	Debug          bool
 	RXCorrectionGB string
 	TXCorrectionGB string
-	InstallDir     string
-	ServiceName    string
 	NoStart        bool
 }
 

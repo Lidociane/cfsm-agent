@@ -22,12 +22,6 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 wget -O- https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sudo sh -s -- install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
 ```
 
-macOS 也可以不加 `sudo` 以当前用户身份安装：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
-```
-
 ## Windows 安装
 
 请使用管理员权限打开 PowerShell，然后执行：
@@ -55,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 也可以通过环境变量配置：
 
 ```bash
-CF_PROBE_VERSION=v1.0.0 CF_PROBE_GH_PROXY=https://gh-proxy.example.com sh install.sh install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
+sudo env CF_PROBE_VERSION=v1.0.0 CF_PROBE_GH_PROXY=https://gh-proxy.example.com sh install.sh install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
 ```
 
 ## 常用安装参数
@@ -77,8 +71,6 @@ CF_PROBE_VERSION=v1.0.0 CF_PROBE_GH_PROXY=https://gh-proxy.example.com sh instal
 | `-rx_correction=N` | 下行流量校正，单位 GB | 空 |
 | `-tx_correction=N` | 上行流量校正，单位 GB | 空 |
 | `-debug=0|1` | 是否开启调试日志 | `0` |
-| `-install_dir=PATH` | 自定义二进制安装目录 | 按系统自动选择 |
-| `-service_name=NAME` | 自定义服务名 | `cf-probe` |
 | `-no_start` | 安装后不立即启动服务 | 不启用 |
 
 再次执行 `install` 时，如果本机已有配置文件且未传入完整的 `-id`、`-secret`、`-url`，程序会沿用已有配置。
@@ -90,11 +82,10 @@ CF_PROBE_VERSION=v1.0.0 CF_PROBE_GH_PROXY=https://gh-proxy.example.com sh instal
 | Linux / Synology DSM | `/usr/local/bin/cf-probe` | `/etc/config/cf-probe/config.conf` | `/var/log/cf-probe.log` |
 | OpenWrt | `/usr/bin/cf-probe` | `/etc/config/cf-probe/config.conf` | `/var/log/cf-probe.log` |
 | FreeBSD | `/usr/local/bin/cf-probe` | `/etc/config/cf-probe/config.conf` | `/var/log/cf-probe.log` |
-| macOS root 安装 | `/usr/local/bin/cf-probe` | `/usr/local/etc/cf-probe/config.conf` | `/var/log/cf-probe.log` |
-| macOS 用户安装 | `~/.cf-probe/bin/cf-probe` | `~/.cf-probe/config.conf` | `~/Library/Logs/cf-probe.log` |
+| macOS | `/usr/local/bin/cf-probe` | `/usr/local/etc/cf-probe/config.conf` | `/var/log/cf-probe.log` |
 | Windows | `C:\Program Files\cf-probe\cf-probe.exe` | `C:\ProgramData\cf-probe\config.conf` | `C:\ProgramData\cf-probe\cf-probe.log` |
 
-服务会根据系统自动注册为 `systemd`、`OpenRC`、`procd`、`launchd`、Synology rc、Windows 计划任务，或在不支持服务管理器的环境中后台运行。
+服务名固定为 `cf-probe`。服务会根据系统自动注册为 `systemd`、`OpenRC`、`procd`、`launchd`、Synology rc、Windows 计划任务，或在不支持服务管理器的环境中后台运行。
 
 ## 查看状态和日志
 
@@ -122,8 +113,8 @@ tail -f /var/log/cf-probe.log
 macOS：
 
 ```bash
-launchctl list | grep cf-probe
-tail -f ~/Library/Logs/cf-probe.log
+sudo launchctl print system/com.cfsm.cf-probe
+sudo tail -f /var/log/cf-probe.log
 ```
 
 Windows：
@@ -135,29 +126,32 @@ Get-Content "C:\ProgramData\cf-probe\cf-probe.log" -Wait
 
 ## 卸载
 
+推荐使用安装脚本触发卸载。脚本会下载临时 `cf-probe` 执行卸载，避免 Windows 下运行中的已安装程序无法删除自身。
+
 Linux、OpenWrt、Synology DSM、FreeBSD、macOS：
-
-```bash
-sudo cf-probe uninstall
-```
-
-也可以直接使用安装脚本触发卸载：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sudo sh -s -- uninstall
 ```
 
-Windows：
+Windows 请使用管理员权限打开 PowerShell：
 
 ```powershell
-& "C:\Program Files\cf-probe\cf-probe.exe" uninstall
+$script = "$env:TEMP\install-cf-probe.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+PowerShell -ExecutionPolicy Bypass -File $script uninstall
 ```
 
-如果安装时使用了自定义服务名，卸载时也需要传入相同名称：
+卸载会清理当前 Go 版默认安装创建的固定位置和自启动项，不处理旧脚本或手动放置到其他路径的文件。
 
-```bash
-sudo cf-probe uninstall -service_name=NAME
-```
+| 系统 | 清理内容 |
+| --- | --- |
+| Linux / FreeBSD / Synology DSM | 停止后台进程，删除二进制、`/etc/config/cf-probe`、PID、日志、debug env、`systemd`、OpenRC、`upstart`、Synology rc |
+| OpenWrt | 停止后台进程，删除二进制、`/etc/config/cf-probe`、PID、日志、debug env、`/etc/init.d/cf-probe` 的 `procd` 服务 |
+| macOS | 删除 `/usr/local/bin/cf-probe`、`/usr/local/etc/cf-probe`、PID、日志和系统级 `launchd`；使用 `sudo` 时也会尝试清理当前登录用户的默认用户级残留 |
+| Windows | 停止并删除 Windows 计划任务，删除 `C:\Program Files\cf-probe` 和 `C:\ProgramData\cf-probe`；如 exe 正在运行，会安排延迟删除 |
+
+卸载结束后会检查残留。如果仍有文件或自启动项未删除，会输出 `[WARN] 卸载残留: ...` 并返回失败，按提示路径手动确认即可。
 
 ## 从源码构建
 

@@ -1,7 +1,6 @@
 ﻿$ErrorActionPreference = "Stop"
 
 $Repo = if ($env:CF_PROBE_REPO) { $env:CF_PROBE_REPO } else { "huilang-me/cfsm-agent" }
-$ServiceName = if ($env:CF_PROBE_SERVICE_NAME) { $env:CF_PROBE_SERVICE_NAME } else { "cf-probe" }
 $GitHubProxy = if ($env:CF_PROBE_GH_PROXY) { $env:CF_PROBE_GH_PROXY } else { "" }
 $InstallVersion = if ($env:CF_PROBE_VERSION) { $env:CF_PROBE_VERSION } else { "latest" }
 
@@ -11,7 +10,6 @@ foreach ($arg in $args) {
         switch ($needValueFor) {
             "proxy" { $GitHubProxy = $arg }
             "version" { $InstallVersion = $arg }
-            "service" { $ServiceName = $arg }
         }
         $needValueFor = ""
         continue
@@ -21,8 +19,6 @@ foreach ($arg in $args) {
         "^--install-ghproxy$" { $needValueFor = "proxy"; continue }
         "^--install-version=(.+)$" { $InstallVersion = $Matches[1]; continue }
         "^--install-version$" { $needValueFor = "version"; continue }
-        "^(--service_name|--service-name|-service_name|-service-name)=(.+)$" { $ServiceName = $Matches[2]; continue }
-        "^(--service_name|--service-name|-service_name|-service-name)$" { $needValueFor = "service"; continue }
     }
 }
 
@@ -37,8 +33,7 @@ function Get-ArchName {
 
 function Find-InstalledBinary {
     $candidates = @(
-        (Join-Path $env:ProgramFiles "cf-probe\$ServiceName.exe"),
-        (Join-Path $env:ProgramData "cf-probe\$ServiceName.exe")
+        (Join-Path $env:ProgramFiles "cf-probe\cf-probe.exe")
     )
     foreach ($candidate in $candidates) {
         if (Test-Path $candidate) { return $candidate }
@@ -47,11 +42,14 @@ function Find-InstalledBinary {
 }
 
 $command = if ($args.Count -gt 0) { $args[0] } else { "install" }
+$payloadArgs = @($args)
 if ($command -in @("uninstall", "remove", "delete", "purge")) {
     $installed = Find-InstalledBinary
-    if (-not $installed) { throw "installed $ServiceName binary was not found" }
-    & $installed @args
-    exit $LASTEXITCODE
+    if ($env:CF_PROBE_UNINSTALL_USE_INSTALLED -eq "1" -and $installed) {
+        & $installed @payloadArgs
+        exit $LASTEXITCODE
+    }
+    Write-Host "[INFO] downloading temporary uninstaller"
 }
 
 $arch = Get-ArchName
@@ -75,10 +73,9 @@ try {
     if ($args.Count -eq 0) {
         & $tmp install
     } else {
-        & $tmp @args
+        & $tmp @payloadArgs
     }
     exit $LASTEXITCODE
 } finally {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 }
-

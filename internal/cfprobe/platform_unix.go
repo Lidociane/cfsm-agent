@@ -15,33 +15,17 @@ import (
 	"syscall"
 )
 
-func defaultPaths(serviceName, installDir string) Paths {
-	if serviceName == "" {
-		serviceName = serviceNameDefault
-	}
-	if installDir == "" {
-		switch {
-		case runtime.GOOS == "darwin" && !isRootUser():
-			home, _ := os.UserHomeDir()
-			installDir = filepath.Join(home, ".cf-probe", "bin")
-		case isOpenWrt():
-			installDir = "/usr/bin"
-		default:
-			installDir = "/usr/local/bin"
-		}
+func defaultPaths() Paths {
+	serviceName := serviceNameDefault
+	installDir := "/usr/local/bin"
+	if isOpenWrt() {
+		installDir = "/usr/bin"
 	}
 	configDir := "/etc/config/cf-probe"
 	pidFile := filepath.Join("/run", serviceName+".pid")
 	logFile := filepath.Join("/var/log", serviceName+".log")
 	if runtime.GOOS == "darwin" {
-		if isRootUser() {
-			configDir = "/usr/local/etc/cf-probe"
-		} else {
-			home, _ := os.UserHomeDir()
-			configDir = filepath.Join(home, ".cf-probe")
-			pidFile = filepath.Join(home, ".cf-probe", serviceName+".pid")
-			logFile = filepath.Join(home, "Library", "Logs", serviceName+".log")
-		}
+		configDir = "/usr/local/etc/cf-probe"
 	}
 	return Paths{
 		ServiceName:     serviceName,
@@ -60,12 +44,225 @@ func defaultPaths(serviceName, installDir string) Paths {
 	}
 }
 
-func requireInstallPermission() error {
-	if runtime.GOOS == "darwin" && !isRootUser() {
-		return nil
+func darwinUserPaths(home string) Paths {
+	serviceName := serviceNameDefault
+	if home == "" {
+		home = userHomeDir()
 	}
+	configDir := filepath.Join(home, ".cf-probe")
+	return Paths{
+		ServiceName:     serviceName,
+		BinaryFile:      filepath.Join(home, ".cf-probe", "bin", serviceName),
+		ConfigDir:       configDir,
+		ConfigFile:      filepath.Join(configDir, "config.conf"),
+		TrafficFile:     filepath.Join(configDir, "traffic.dat"),
+		OldTrafficFile:  "/var/lib/cf-probe/traffic.dat",
+		PIDFile:         filepath.Join(configDir, serviceName+".pid"),
+		LogFile:         filepath.Join(home, "Library", "Logs", serviceName+".log"),
+		ServiceFile:     filepath.Join("/etc/systemd/system", serviceName+".service"),
+		DebugEnvFile:    filepath.Join("/run", serviceName+"-debug.env"),
+		LaunchdLabel:    "com.cfsm." + serviceName,
+		LaunchdUserFile: filepath.Join(home, "Library", "LaunchAgents", "com.cfsm."+serviceName+".plist"),
+		LaunchdRootFile: filepath.Join("/Library/LaunchDaemons", "com.cfsm."+serviceName+".plist"),
+	}
+}
+
+func sudoUserHomeDir() string {
+	if user := os.Getenv("SUDO_USER"); user != "" && user != "root" {
+		if home := darwinAccountHome(user); home != "" {
+			return home
+		}
+		return filepath.Join("/Users", user)
+	}
+	home := os.Getenv("HOME")
+	if home == "" || home == "/var/root" || home == "/" {
+		return ""
+	}
+	return home
+}
+
+func darwinAccountHome(user string) string {
+	if runtime.GOOS != "darwin" || user == "" {
+		return ""
+	}
+	out := commandOutput("dscl", ".", "-read", "/Users/"+user, "NFSHomeDirectory")
+	const prefix = "NFSHomeDirectory:"
+	if strings.HasPrefix(out, prefix) {
+		return strings.TrimSpace(strings.TrimPrefix(out, prefix))
+	}
+	return ""
+}
+
+func sudoUserUID(home string) int {
+	if raw := os.Getenv("SUDO_UID"); raw != "" {
+		if uid, err := strconv.Atoi(raw); err == nil && uid > 0 {
+			return uid
+		}
+	}
+	if home == "" {
+		return -1
+	}
+	info, err := os.Stat(home)
+	if err != nil {
+		return -1
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return -1
+	}
+	return int(stat.Uid)
+}
+
+func deepUninstall(paths Paths) []string {
+	stopUnixAutostart(paths)
+	removeUnixAutostart(paths)
+	removeInstalledFiles(paths)
+	if runtime.GOOS == "darwin" {
+		removeDarwinInstallVariants()
+	}
+	return unixUninstallResiduals(paths)
+}
+
+func stopUnixAutostart(paths Paths) {
+	if runtime.GOOS == "darwin" {
+		bootoutLaunchd("system", paths.LaunchdRootFile)
+		bootoutLaunchdLabel("system", paths.LaunchdLabel)
+		stopDetached(paths.PIDFile)
+		return
+	}
+	if commandExists("systemctl") {
+		_ = runCommandQuiet("systemctl", "stop", paths.ServiceName+".service")
+		_ = runCommandQuiet("systemctl", "disable", paths.ServiceName+".service")
+	}
+	if commandExists("rc-service") {
+		_ = runCommandQuiet("rc-service", paths.ServiceName, "stop")
+	}
+	if commandExists("rc-update") {
+		_ = runCommandQuiet("rc-update", "del", paths.ServiceName, "default")
+	}
+	initScript := filepath.Join("/etc/init.d", paths.ServiceName)
+	if fileExists(initScript) {
+		_ = runCommandQuiet(initScript, "stop")
+		_ = runCommandQuiet(initScript, "disable")
+	}
+	if commandExists("initctl") {
+		_ = runCommandQuiet("initctl", "stop", paths.ServiceName)
+	}
+	if fileExists(synologyServiceFile(paths)) {
+		_ = runCommandQuiet(synologyServiceFile(paths), "stop")
+	}
+	stopDetached(paths.PIDFile)
+}
+
+func removeUnixAutostart(paths Paths) {
+	if runtime.GOOS == "darwin" {
+		_ = os.Remove(paths.LaunchdRootFile)
+		return
+	}
+	_ = os.Remove(paths.ServiceFile)
+	_ = os.Remove(filepath.Join("/etc/init.d", paths.ServiceName))
+	_ = os.Remove(filepath.Join("/etc/init", paths.ServiceName+".conf"))
+	_ = os.Remove(synologyServiceFile(paths))
+	if commandExists("systemctl") {
+		_ = runCommandQuiet("systemctl", "daemon-reload")
+		_ = runCommandQuiet("systemctl", "reset-failed", paths.ServiceName)
+		_ = runCommandQuiet("systemctl", "reset-failed", paths.ServiceName+".service")
+	}
+}
+
+func unixUninstallResiduals(paths Paths) []string {
+	if runtime.GOOS == "darwin" {
+		return darwinUninstallResiduals(paths)
+	}
+	return existingPaths(
+		paths.BinaryFile,
+		paths.ConfigDir,
+		paths.PIDFile,
+		paths.LogFile,
+		paths.DebugEnvFile,
+		paths.ServiceFile,
+		filepath.Join("/etc/init.d", paths.ServiceName),
+		filepath.Join("/etc/init", paths.ServiceName+".conf"),
+		synologyServiceFile(paths),
+	)
+}
+
+func removeDarwinInstallVariants() {
+	if home := sudoUserHomeDir(); home != "" {
+		userPaths := darwinUserPaths(home)
+		removeDarwinUserInstall(userPaths, sudoUserUID(home))
+	}
+}
+
+func removeDarwinUserInstall(paths Paths, uid int) {
+	if uid > 0 {
+		domain := "gui/" + strconv.Itoa(uid)
+		bootoutLaunchd(domain, paths.LaunchdUserFile)
+		bootoutLaunchdLabel(domain, paths.LaunchdLabel)
+	}
+	_ = os.Remove(paths.LaunchdUserFile)
+	removeInstalledFiles(paths)
+}
+
+func darwinUninstallResiduals(paths Paths) []string {
+	var residuals []string
+	residuals = append(residuals, existingPaths(
+		paths.BinaryFile,
+		paths.ConfigDir,
+		paths.PIDFile,
+		paths.LogFile,
+		paths.LaunchdRootFile,
+	)...)
+	if launchdLabelLoaded("system", paths.LaunchdLabel) {
+		residuals = append(residuals, "launchd:"+"/system/"+paths.LaunchdLabel)
+	}
+	if home := sudoUserHomeDir(); home != "" {
+		userPaths := darwinUserPaths(home)
+		residuals = append(residuals, existingPaths(
+			userPaths.BinaryFile,
+			userPaths.ConfigDir,
+			userPaths.PIDFile,
+			userPaths.LogFile,
+			userPaths.LaunchdUserFile,
+		)...)
+		if uid := sudoUserUID(home); uid > 0 && launchdLabelLoaded("gui/"+strconv.Itoa(uid), userPaths.LaunchdLabel) {
+			residuals = append(residuals, "launchd:/gui/"+strconv.Itoa(uid)+"/"+userPaths.LaunchdLabel)
+		}
+	}
+	return uniqueStrings(residuals)
+}
+
+func bootoutLaunchd(domain, plist string) {
+	if runtime.GOOS != "darwin" || domain == "" || plist == "" || !commandExists("launchctl") {
+		return
+	}
+	_ = runCommandQuiet("launchctl", "bootout", domain, plist)
+}
+
+func bootoutLaunchdLabel(domain, label string) {
+	if runtime.GOOS != "darwin" || domain == "" || label == "" || !commandExists("launchctl") {
+		return
+	}
+	_ = runCommandQuiet("launchctl", "bootout", domain+"/"+label)
+}
+
+func launchdLabelLoaded(domain, label string) bool {
+	if runtime.GOOS != "darwin" || domain == "" || label == "" || !commandExists("launchctl") {
+		return false
+	}
+	return runCommandQuiet("launchctl", "print", domain+"/"+label) == nil
+}
+
+func requireInstallPermission() error {
 	if !isRootUser() {
 		return errors.New("请使用 root 权限运行安装: sudo ./cf-probe install ...")
+	}
+	return nil
+}
+
+func requireUninstallPermission() error {
+	if !isRootUser() {
+		return errors.New("请使用 root 权限运行卸载: sudo ./cf-probe uninstall")
 	}
 	return nil
 }

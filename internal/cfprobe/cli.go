@@ -31,11 +31,11 @@ func Execute(args []string, buildVersion string) error {
 		}
 		return Run(configFile, debug, buildVersion)
 	case "uninstall", "remove", "delete", "purge":
-		serviceName := serviceNameDefault
-		if len(args) > 1 && strings.HasPrefix(args[1], "-service_name=") {
-			serviceName = strings.TrimPrefix(args[1], "-service_name=")
+		if err := parseUninstallArgs(args[1:]); err != nil {
+			printUsage(os.Stderr)
+			return err
 		}
-		return Uninstall(serviceName)
+		return Uninstall(buildVersion)
 	case "version", "-v", "--version":
 		fmt.Printf("CF-Server-Monitor Go Probe %s\n", buildVersion)
 		return nil
@@ -48,7 +48,7 @@ func Execute(args []string, buildVersion string) error {
 }
 
 func parseInstallOptions(args []string) (InstallOptions, error) {
-	opts := InstallOptions{Config: defaultConfig(), ServiceName: serviceNameDefault}
+	opts := InstallOptions{Config: defaultConfig()}
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -73,10 +73,6 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs.StringVar(&opts.RXCorrectionGB, "rx_correction", "", "")
 	fs.StringVar(&opts.TXCorrectionGB, "tx_correction", "", "")
 	fs.StringVar(&debug, "debug", "", "")
-	fs.StringVar(&opts.InstallDir, "install_dir", "", "")
-	fs.StringVar(&opts.InstallDir, "install-dir", "", "")
-	fs.StringVar(&opts.ServiceName, "service_name", serviceNameDefault, "")
-	fs.StringVar(&opts.ServiceName, "service-name", serviceNameDefault, "")
 	fs.StringVar(&ignoredInstallProxy, "install-ghproxy", "", "")
 	fs.StringVar(&ignoredInstallVersion, "install-version", "", "")
 	fs.BoolVar(&opts.NoStart, "no_start", false, "")
@@ -85,9 +81,6 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	if err := fs.Parse(args); err != nil {
 		printUsage(os.Stderr)
 		return opts, err
-	}
-	if opts.ServiceName == "" {
-		opts.ServiceName = serviceNameDefault
 	}
 	var err error
 	opts.AutoUpdate, err = normalizeBinaryValue(autoUpdate, false)
@@ -120,6 +113,18 @@ func parseRunOptions(args []string) (bool, string, error) {
 	return debug, configFile, err
 }
 
+func parseUninstallArgs(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("uninstall 不支持参数: %s", strings.Join(fs.Args(), " "))
+	}
+	return nil
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "用法:")
 	fmt.Fprintln(w, "  cf-probe install -id=SERVER_ID -secret=SECRET -url=WORKER_URL [选项]")
@@ -136,8 +141,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -rx_correction=N     下行流量校正(GB)")
 	fmt.Fprintln(w, "  -tx_correction=N     上行流量校正(GB)")
 	fmt.Fprintln(w, "  -debug=0|1           运行调试日志，默认0")
-	fmt.Fprintln(w, "  -install_dir=PATH    自定义二进制安装目录")
-	fmt.Fprintln(w, "  -service_name=NAME   自定义服务名，默认cf-probe")
 }
 
 func atoi64Default(raw string, def int64) int64 {

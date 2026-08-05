@@ -6,12 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 )
 
 func Install(opts InstallOptions, version string) error {
-	paths := defaultPaths(opts.ServiceName, opts.InstallDir)
+	paths := defaultPaths()
 	printBanner(version)
 	if err := requireInstallPermission(); err != nil {
 		return err
@@ -65,18 +64,66 @@ func Install(opts InstallOptions, version string) error {
 	return nil
 }
 
-func Uninstall(serviceName string) error {
-	paths := defaultPaths(serviceName, "")
-	printBanner("")
-	fmt.Println("[INFO] 开始卸载 cf-probe")
-	stopService(paths)
-	removeService(paths)
-	stopDetached(paths.PIDFile)
-	_ = os.Remove(paths.BinaryFile)
-	_ = os.RemoveAll(paths.ConfigDir)
-	_ = os.Remove(paths.LogFile)
+func Uninstall(version string) error {
+	paths := defaultPaths()
+	printBanner(version)
+	if err := requireUninstallPermission(); err != nil {
+		return err
+	}
+	fmt.Printf("[INFO] 开始卸载 %s\n", paths.ServiceName)
+	residuals := deepUninstall(paths)
+	if len(residuals) > 0 {
+		for _, item := range residuals {
+			fmt.Printf("[WARN] 卸载残留: %s\n", item)
+		}
+		return fmt.Errorf("卸载未完全清理，仍有 %d 项残留", len(residuals))
+	}
 	fmt.Println("[INFO] 卸载完成")
 	return nil
+}
+
+func removeInstalledFiles(paths Paths) {
+	stopDetached(paths.PIDFile)
+	_ = os.Remove(paths.BinaryFile)
+	removeDir(paths.ConfigDir)
+	_ = os.Remove(paths.PIDFile)
+	_ = os.Remove(paths.LogFile)
+	_ = os.Remove(paths.DebugEnvFile)
+}
+
+func removeDir(path string) {
+	if path == "" || path == "/" || path == "." {
+		return
+	}
+	_ = os.RemoveAll(path)
+}
+
+func existingPaths(paths ...string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if _, err := os.Lstat(path); err == nil {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+func uniqueStrings(values []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func printBanner(version string) {
@@ -206,12 +253,8 @@ func startService(paths Paths, debug bool) error {
 		return runCommand("/etc/init.d/"+paths.ServiceName, "restart")
 	case "launchd":
 		plist := launchdPlist(paths)
-		domain := "system"
-		if runtime.GOOS == "darwin" && !isRootUser() {
-			domain = "gui/" + strconv.Itoa(currentUID())
-		}
-		_ = runCommandQuiet("launchctl", "bootout", domain, plist)
-		return runCommand("launchctl", "bootstrap", domain, plist)
+		_ = runCommandQuiet("launchctl", "bootout", "system", plist)
+		return runCommand("launchctl", "bootstrap", "system", plist)
 	case "upstart":
 		_ = runCommand("initctl", "reload-configuration")
 		_ = runCommand("initctl", "stop", paths.ServiceName)
@@ -242,11 +285,7 @@ func stopService(paths Paths) {
 		_ = runCommand("/etc/init.d/"+paths.ServiceName, "disable")
 	case "launchd":
 		plist := launchdPlist(paths)
-		domain := "system"
-		if runtime.GOOS == "darwin" && !isRootUser() {
-			domain = "gui/" + strconv.Itoa(currentUID())
-		}
-		_ = runCommandQuiet("launchctl", "bootout", domain, plist)
+		_ = runCommandQuiet("launchctl", "bootout", "system", plist)
 	case "upstart":
 		_ = runCommand("initctl", "stop", paths.ServiceName)
 	case "synology-rc":
@@ -454,9 +493,6 @@ func fileExists(path string) bool {
 }
 
 func launchdPlist(paths Paths) string {
-	if runtime.GOOS == "darwin" && !isRootUser() {
-		return paths.LaunchdUserFile
-	}
 	return paths.LaunchdRootFile
 }
 

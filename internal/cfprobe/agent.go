@@ -106,7 +106,7 @@ func (h rollingProbeHistory) snapshot(now time.Time) ProbeResult {
 }
 
 func Run(configFile string, debug bool, version string) error {
-	paths := defaultPaths(serviceNameDefault, "")
+	paths := defaultPaths()
 	if configFile != "" {
 		paths.ConfigFile = configFile
 		paths.ConfigDir = filepath.Dir(configFile)

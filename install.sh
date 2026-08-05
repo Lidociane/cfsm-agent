@@ -2,7 +2,6 @@
 set -eu
 
 REPO="${CF_PROBE_REPO:-huilang-me/cfsm-agent}"
-SERVICE_NAME="${CF_PROBE_SERVICE_NAME:-cf-probe}"
 GITHUB_PROXY="${CF_PROBE_GH_PROXY:-}"
 INSTALL_VERSION="${CF_PROBE_VERSION:-latest}"
 
@@ -21,7 +20,6 @@ for arg in "$@"; do
         case "$need_value_for" in
             proxy) GITHUB_PROXY="$arg" ;;
             version) INSTALL_VERSION="$arg" ;;
-            service) SERVICE_NAME="$arg" ;;
         esac
         need_value_for=""
         continue
@@ -31,8 +29,6 @@ for arg in "$@"; do
         --install-ghproxy) need_value_for="proxy" ;;
         --install-version=*) INSTALL_VERSION="${arg#*=}" ;;
         --install-version) need_value_for="version" ;;
-        --service_name=*|--service-name=*|-service_name=*|-service-name=*) SERVICE_NAME="${arg#*=}" ;;
-        --service_name|--service-name|-service_name|-service-name) need_value_for="service" ;;
     esac
 done
 
@@ -78,9 +74,9 @@ run_payload() {
     shift
     if [ "$#" -eq 0 ]; then
         "$bin" install
-    else
-        "$bin" "$@"
+        return
     fi
+    "$bin" "$@"
 }
 
 dir_has_noexec() {
@@ -123,7 +119,7 @@ stage_and_run_payload() {
 
 find_installed_binary() {
     home_dir="${HOME:-}"
-    for p in "/usr/local/bin/$SERVICE_NAME" "/usr/bin/$SERVICE_NAME" "$home_dir/.cf-probe/bin/$SERVICE_NAME"; do
+    for p in "/usr/local/bin/cf-probe" "/usr/bin/cf-probe" "$home_dir/.cf-probe/bin/cf-probe"; do
         if [ -x "$p" ]; then
             printf '%s' "$p"
             return 0
@@ -135,10 +131,10 @@ find_installed_binary() {
 cmd="${1:-install}"
 case "$cmd" in
     uninstall|remove|delete|purge)
-        if bin="$(find_installed_binary)"; then
+        if [ "${CF_PROBE_UNINSTALL_USE_INSTALLED:-0}" = "1" ] && bin="$(find_installed_binary)"; then
             exec "$bin" "$@"
         fi
-        die "installed $SERVICE_NAME binary was not found"
+        log "[INFO] downloading temporary uninstaller"
         ;;
 esac
 

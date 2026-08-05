@@ -13,19 +13,15 @@ import (
 	"strings"
 )
 
-func defaultPaths(serviceName, installDir string) Paths {
-	if serviceName == "" {
-		serviceName = serviceNameDefault
-	}
+func defaultPaths() Paths {
+	serviceName := serviceNameDefault
 	programData := os.Getenv("ProgramData")
 	if programData == "" {
 		programData = `C:\ProgramData`
 	}
-	if installDir == "" {
-		installDir = filepath.Join(os.Getenv("ProgramFiles"), "cf-probe")
-		if strings.TrimSpace(installDir) == "cf-probe" {
-			installDir = `C:\Program Files\cf-probe`
-		}
+	installDir := filepath.Join(os.Getenv("ProgramFiles"), "cf-probe")
+	if strings.TrimSpace(installDir) == "cf-probe" {
+		installDir = `C:\Program Files\cf-probe`
 	}
 	binary := filepath.Join(installDir, serviceName+".exe")
 	configDir := filepath.Join(programData, "cf-probe")
@@ -45,6 +41,10 @@ func defaultPaths(serviceName, installDir string) Paths {
 }
 
 func requireInstallPermission() error {
+	return nil
+}
+
+func requireUninstallPermission() error {
 	return nil
 }
 
@@ -102,6 +102,94 @@ func startDetached(binary string, args []string, logFile, pidFile string) error 
 
 func stopDetached(pidFile string) {
 	_ = os.Remove(pidFile)
+}
+
+func deepUninstall(paths Paths) []string {
+	_ = runCommandQuiet("schtasks", "/End", "/TN", paths.ServiceName)
+	_ = runCommandQuiet("schtasks", "/Delete", "/TN", paths.ServiceName, "/F")
+	removeInstalledFiles(paths)
+	delayed := removeWindowsBinary(paths)
+	return windowsUninstallResiduals(paths, delayed)
+}
+
+func removeWindowsBinary(paths Paths) []string {
+	var delayed []string
+	if removeWindowsFile(paths.BinaryFile) {
+		delayed = append(delayed, paths.BinaryFile)
+	}
+	if removeWindowsFile(paths.BinaryFile + ".tmp") {
+		delayed = append(delayed, paths.BinaryFile+".tmp")
+	}
+	_ = os.Remove(filepath.Dir(paths.BinaryFile))
+	return delayed
+}
+
+func removeWindowsFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	if err := os.Remove(path); err == nil || os.IsNotExist(err) {
+		return false
+	}
+	return scheduleWindowsFileRemoval(path)
+}
+
+func scheduleWindowsFileRemoval(path string) bool {
+	dir := filepath.Dir(path)
+	script := strings.Join([]string{
+		"Start-Sleep -Seconds 2",
+		"Remove-Item -LiteralPath " + quotePowerShellLiteral(path) + " -Force -ErrorAction SilentlyContinue",
+		"Remove-Item -LiteralPath " + quotePowerShellLiteral(dir) + " -Force -ErrorAction SilentlyContinue",
+	}, "; ")
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	if err := cmd.Start(); err == nil {
+		_ = cmd.Process.Release()
+		return true
+	}
+	return false
+}
+
+func windowsUninstallResiduals(paths Paths, delayed []string) []string {
+	delayedSet := map[string]bool{}
+	for _, path := range delayed {
+		delayedSet[path] = true
+	}
+	checks := []string{
+		paths.BinaryFile,
+		paths.ConfigDir,
+		paths.PIDFile,
+		paths.LogFile,
+		paths.DebugEnvFile,
+	}
+	var residuals []string
+	for _, path := range existingPaths(checks...) {
+		if !delayedSet[path] && !delayedPathInDir(delayed, path) {
+			residuals = append(residuals, path)
+		}
+	}
+	if runCommandQuiet("schtasks", "/Query", "/TN", paths.ServiceName) == nil {
+		residuals = append(residuals, "scheduled-task:"+paths.ServiceName)
+	}
+	return uniqueStrings(residuals)
+}
+
+func delayedPathInDir(delayed []string, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	cleanDir := filepath.Clean(dir)
+	prefix := cleanDir + string(os.PathSeparator)
+	for _, path := range delayed {
+		cleanPath := filepath.Clean(path)
+		if strings.EqualFold(cleanPath, cleanDir) || strings.HasPrefix(strings.ToLower(cleanPath), strings.ToLower(prefix)) {
+			return true
+		}
+	}
+	return false
+}
+
+func quotePowerShellLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 func runCommand(name string, args ...string) error {
