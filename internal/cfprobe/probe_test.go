@@ -1,7 +1,9 @@
 package cfprobe
 
 import (
+	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +41,93 @@ func TestWorkerOrigin(t *testing.T) {
 	}
 	if got != "https://worker.example.com" {
 		t.Fatalf("unexpected origin: %s", got)
+	}
+}
+
+func resetDNSCacheForTest(t *testing.T) {
+	t.Helper()
+	oldLookup := lookupIP
+	dnsCacheMu.Lock()
+	dnsCache = map[string]dnsCacheEntry{}
+	dnsCacheMu.Unlock()
+	t.Cleanup(func() {
+		lookupIP = oldLookup
+		dnsCacheMu.Lock()
+		dnsCache = map[string]dnsCacheEntry{}
+		dnsCacheMu.Unlock()
+	})
+}
+
+func TestResolveFirstIPCachesDNSForThirtyMinutes(t *testing.T) {
+	resetDNSCacheForTest(t)
+	calls := 0
+	lookupIP = func(context.Context, string) ([]net.IPAddr, error) {
+		calls++
+		return []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}}, nil
+	}
+
+	first, err := resolveFirstIP(context.Background(), "Example.COM")
+	if err != nil {
+		t.Fatalf("resolveFirstIP returned error: %v", err)
+	}
+	second, err := resolveFirstIP(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("resolveFirstIP returned error: %v", err)
+	}
+	if first != "192.0.2.1" || second != "192.0.2.1" {
+		t.Fatalf("got %q and %q, want cached 192.0.2.1", first, second)
+	}
+	if calls != 1 {
+		t.Fatalf("lookup calls = %d, want 1", calls)
+	}
+	dnsCacheMu.RLock()
+	entry := dnsCache["example.com"]
+	dnsCacheMu.RUnlock()
+	if !entry.expiresAt.After(time.Now().Add(29 * time.Minute)) {
+		t.Fatalf("cache expires too soon: %s", entry.expiresAt)
+	}
+}
+
+func TestResolveFirstIPRefreshesExpiredCache(t *testing.T) {
+	resetDNSCacheForTest(t)
+	dnsCacheMu.Lock()
+	dnsCache["example.com"] = dnsCacheEntry{ip: "192.0.2.1", expiresAt: time.Now().Add(-time.Minute)}
+	dnsCacheMu.Unlock()
+	calls := 0
+	lookupIP = func(context.Context, string) ([]net.IPAddr, error) {
+		calls++
+		return []net.IPAddr{{IP: net.ParseIP("192.0.2.2")}}, nil
+	}
+
+	got, err := resolveFirstIP(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("resolveFirstIP returned error: %v", err)
+	}
+	if got != "192.0.2.2" {
+		t.Fatalf("got %q, want refreshed 192.0.2.2", got)
+	}
+	if calls != 1 {
+		t.Fatalf("lookup calls = %d, want 1", calls)
+	}
+}
+
+func TestResolveFirstIPSkipsDNSForIPLiteral(t *testing.T) {
+	resetDNSCacheForTest(t)
+	calls := 0
+	lookupIP = func(context.Context, string) ([]net.IPAddr, error) {
+		calls++
+		return nil, errors.New("unexpected dns lookup")
+	}
+
+	got, err := resolveFirstIP(context.Background(), "192.0.2.10")
+	if err != nil {
+		t.Fatalf("resolveFirstIP returned error: %v", err)
+	}
+	if got != "192.0.2.10" {
+		t.Fatalf("got %q, want literal IP", got)
+	}
+	if calls != 0 {
+		t.Fatalf("lookup calls = %d, want 0", calls)
 	}
 }
 

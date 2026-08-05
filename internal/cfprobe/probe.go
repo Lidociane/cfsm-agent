@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	ping "github.com/prometheus-community/pro-bing"
@@ -22,6 +23,21 @@ const (
 	retryDropThresholdTCPMS = 800
 	defaultTaskPingTCPPort  = 80
 	defaultMetricsTCPPort   = 80
+	dnsCacheTTL             = 30 * time.Minute
+)
+
+type dnsCacheEntry struct {
+	ip        string
+	expiresAt time.Time
+}
+
+var (
+	dnsCacheMu sync.RWMutex
+	dnsCache   = map[string]dnsCacheEntry{}
+	lookupIP   = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		resolver := net.Resolver{}
+		return resolver.LookupIPAddr(ctx, host)
+	}
 )
 
 func splitProbeTarget(target string, defaultPort int) (string, int, error) {
@@ -60,18 +76,30 @@ func splitProbeTarget(target string, defaultPort int) (string, int, error) {
 }
 
 func resolveFirstIP(ctx context.Context, host string) (string, error) {
-	host = strings.Trim(host, "[]")
+	host = strings.Trim(strings.TrimSpace(host), "[]")
 	if ip := net.ParseIP(host); ip != nil {
 		return host, nil
 	}
-	resolver := net.Resolver{}
-	addrs, err := resolver.LookupIPAddr(ctx, host)
+	key := strings.ToLower(host)
+	now := time.Now()
+	dnsCacheMu.RLock()
+	if entry, ok := dnsCache[key]; ok && now.Before(entry.expiresAt) {
+		dnsCacheMu.RUnlock()
+		return entry.ip, nil
+	}
+	dnsCacheMu.RUnlock()
+
+	addrs, err := lookupIP(ctx, host)
 	if err != nil {
 		return "", err
 	}
 	for _, addr := range addrs {
 		if addr.IP != nil {
-			return addr.IP.String(), nil
+			ip := addr.IP.String()
+			dnsCacheMu.Lock()
+			dnsCache[key] = dnsCacheEntry{ip: ip, expiresAt: now.Add(dnsCacheTTL)}
+			dnsCacheMu.Unlock()
+			return ip, nil
 		}
 	}
 	return "", errors.New("no address")
