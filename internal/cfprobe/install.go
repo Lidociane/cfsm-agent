@@ -16,10 +16,23 @@ func Install(opts InstallOptions, version string) error {
 		return err
 	}
 
-	existing, existingErr := readConfig(paths.ConfigFile)
+	if cleaned, residuals := cleanupLegacyInstall(paths); len(cleaned) > 0 || len(residuals) > 0 {
+		if len(cleaned) > 0 {
+			fmt.Printf("[INFO] Cleaned legacy shell probe artifacts: %s\n", strings.Join(cleaned, ", "))
+		}
+		if len(residuals) > 0 {
+			for _, item := range residuals {
+				fmt.Printf("[WARN] Legacy shell probe residual: %s\n", item)
+			}
+			return fmt.Errorf("legacy shell probe cleanup incomplete: %s", strings.Join(residuals, ", "))
+		}
+	}
+
+	existing, existingPath, existingErr := readInstallConfig(paths)
 	usingExistingConfig := existingErr == nil && (opts.ServerID == "" || opts.Secret == "" || opts.WorkerURL == "")
 	updateProxy := opts.UpdateProxy
 	if usingExistingConfig {
+		fmt.Printf("[INFO] Config source: %s\n", existingPath)
 		fmt.Printf("[INFO] 检测到已有配置，沿用 %s\n", paths.ConfigFile)
 		opts.Config = existing
 		if updateProxy != "" {
@@ -138,30 +151,6 @@ func printBanner(version string) {
 	fmt.Println("    CF-Server-Monitor Go Probe")
 	fmt.Printf("    Version: %s\n", version)
 	fmt.Println("===========================================")
-}
-
-func migrateTraffic(paths Paths) error {
-	if _, err := os.Stat(paths.TrafficFile); err == nil {
-		return nil
-	}
-	if _, err := os.Stat(paths.OldTrafficFile); err != nil {
-		if err := os.MkdirAll(paths.ConfigDir, 0o755); err != nil {
-			return err
-		}
-		f, createErr := os.OpenFile(paths.TrafficFile, os.O_CREATE, 0o600)
-		if createErr == nil {
-			_ = f.Close()
-		}
-		return createErr
-	}
-	if err := os.MkdirAll(paths.ConfigDir, 0o755); err != nil {
-		return err
-	}
-	if err := os.Rename(paths.OldTrafficFile, paths.TrafficFile); err != nil {
-		return err
-	}
-	_ = os.RemoveAll(filepath.Dir(paths.OldTrafficFile))
-	return nil
 }
 
 func printInstallSummary(paths Paths, opts InstallOptions) {
