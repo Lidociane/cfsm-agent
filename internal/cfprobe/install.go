@@ -174,6 +174,8 @@ func printInstallSummary(paths Paths, opts InstallOptions) {
 	} else {
 		fmt.Printf("  Reset Day   : %d号\n", opts.ResetDay)
 	}
+	printProbeNodes(opts)
+	printManagementCommands(paths)
 	fmt.Println("===========================================")
 }
 
