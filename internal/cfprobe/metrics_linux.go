@@ -5,6 +5,7 @@ package cfprobe
 import (
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -63,7 +64,7 @@ func readProcCPUTimes() (cpuTimes, bool) {
 
 func collectBasicStats() BasicStats {
 	mem := readMemInfo()
-	diskTotal, diskUsed := diskUsageLinux()
+	diskTotal, diskUsed, diskDevices := diskUsageLinux()
 	return BasicStats{
 		MemTotalMB:  mem["MemTotal"] / 1024,
 		MemUsedMB:   usedMemMB(mem),
@@ -71,6 +72,7 @@ func collectBasicStats() BasicStats {
 		SwapUsedMB:  usedSwapMB(mem),
 		DiskTotalMB: diskTotal,
 		DiskUsedMB:  diskUsed,
+		DiskDevices: diskDevices,
 		LoadAvg:     linuxLoadAvg(),
 		BootTimeMS:  linuxBootTimeMS(),
 		OSName:      linuxOSName(),
@@ -249,11 +251,13 @@ func linuxConnCount(name string) int {
 }
 
 type diskUsageEntry struct {
-	total uint64
-	used  uint64
+	total     uint64
+	used      uint64
+	device    DiskDeviceRef
+	hasDevice bool
 }
 
-func diskUsageLinux() (uint64, uint64) {
+func diskUsageLinux() (uint64, uint64, []DiskDeviceRef) {
 	devices := map[string]diskUsageEntry{}
 	_ = scanFile("/proc/mounts", func(line string) {
 		fields := strings.Fields(line)
@@ -283,17 +287,131 @@ func diskUsageLinux() (uint64, uint64) {
 				deviceID = deviceID[:idx]
 			}
 		}
-		entry := diskUsageEntry{total: size, used: used}
+		device, hasDevice := linuxDiskDeviceRef(dev, mountPoint, deviceID)
+		entry := diskUsageEntry{total: size, used: used, device: device, hasDevice: hasDevice}
 		if existing, ok := devices[deviceID]; !ok || entry.total > existing.total {
 			devices[deviceID] = entry
 		}
 	})
 	var total, used uint64
+	diskDevices := make([]DiskDeviceRef, 0, len(devices))
 	for _, entry := range devices {
 		total += entry.total
 		used += entry.used
+		if entry.hasDevice {
+			diskDevices = append(diskDevices, entry.device)
+		}
 	}
-	return total, used
+	sort.Slice(diskDevices, func(i, j int) bool {
+		return diskDevices[i].Key < diskDevices[j].Key
+	})
+	return total, used, diskDevices
+}
+
+func linuxDiskDeviceRef(dev, mountPoint, key string) (DiskDeviceRef, bool) {
+	devPath := unescapeLinuxMountPoint(dev)
+	if strings.HasPrefix(devPath, "/dev/") {
+		var st syscall.Stat_t
+		if err := syscall.Stat(devPath, &st); err == nil && st.Rdev != 0 {
+			if device, ok := linuxDiskDeviceRefFromDev(key, uint64(st.Rdev)); ok {
+				return device, true
+			}
+		}
+	}
+
+	var st syscall.Stat_t
+	if err := syscall.Stat(mountPoint, &st); err == nil && st.Dev != 0 {
+		if device, ok := linuxDiskDeviceRefFromDev(key, uint64(st.Dev)); ok {
+			return device, true
+		}
+	}
+	return DiskDeviceRef{}, false
+}
+
+func linuxDiskDeviceRefFromDev(key string, dev uint64) (DiskDeviceRef, bool) {
+	major, minor := linuxDeviceMajorMinor(dev)
+	if major == 0 && minor == 0 {
+		return DiskDeviceRef{}, false
+	}
+	return DiskDeviceRef{
+		Key:   key,
+		Major: major,
+		Minor: minor,
+	}, true
+}
+
+func linuxDeviceMajorMinor(dev uint64) (uint64, uint64) {
+	major := (dev & 0x00000000000fff00) >> 8
+	major |= (dev & 0xfffff00000000000) >> 32
+	minor := dev & 0x00000000000000ff
+	minor |= (dev & 0x00000ffffff00000) >> 12
+	return major, minor
+}
+
+func readDiskIOCounters(devices []DiskDeviceRef) DiskIOCounters {
+	targets := linuxDiskIOTargets(devices)
+	if len(targets) == 0 {
+		return DiskIOCounters{}
+	}
+	var total DiskIOCounters
+	matched := map[string]bool{}
+	_ = scanFile("/proc/diskstats", func(line string) {
+		fields := strings.Fields(line)
+		if len(fields) < 14 {
+			return
+		}
+		major, err := strconv.ParseUint(fields[0], 10, 64)
+		if err != nil {
+			return
+		}
+		minor, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return
+		}
+		id := linuxDiskID(major, minor)
+		if !targets[id] {
+			return
+		}
+		readOps, _ := strconv.ParseUint(fields[3], 10, 64)
+		readSectors, _ := strconv.ParseUint(fields[5], 10, 64)
+		readTime, _ := strconv.ParseUint(fields[6], 10, 64)
+		writeOps, _ := strconv.ParseUint(fields[7], 10, 64)
+		writeSectors, _ := strconv.ParseUint(fields[9], 10, 64)
+		writeTime, _ := strconv.ParseUint(fields[10], 10, 64)
+		ioTicks, _ := strconv.ParseUint(fields[12], 10, 64)
+
+		total.ReadOps += readOps
+		total.WriteOps += writeOps
+		total.ReadBytes += readSectors * 512
+		total.WriteBytes += writeSectors * 512
+		total.ReadTimeMS += readTime
+		total.WriteTimeMS += writeTime
+		total.IOTicksMS += ioTicks
+		matched[id] = true
+	})
+	keys := make([]string, 0, len(matched))
+	for key := range matched {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	total.DeviceCount = len(keys)
+	total.Fingerprint = strings.Join(keys, ",")
+	return total
+}
+
+func linuxDiskIOTargets(devices []DiskDeviceRef) map[string]bool {
+	targets := map[string]bool{}
+	for _, device := range devices {
+		if device.Major == 0 && device.Minor == 0 {
+			continue
+		}
+		targets[linuxDiskID(device.Major, device.Minor)] = true
+	}
+	return targets
+}
+
+func linuxDiskID(major, minor uint64) string {
+	return strconv.FormatUint(major, 10) + ":" + strconv.FormatUint(minor, 10)
 }
 
 func includeLinuxMount(dev, mountPoint, fsType, opts string) bool {

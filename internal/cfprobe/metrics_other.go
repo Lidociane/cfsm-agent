@@ -33,6 +33,10 @@ func readNetBytes(_ string) NetBytes {
 	return NetBytes{}
 }
 
+func readDiskIOCounters(_ []DiskDeviceRef) DiskIOCounters {
+	return DiskIOCounters{}
+}
+
 func genericLoadAvg() string {
 	out := commandOutput("uptime")
 	idx := strings.LastIndex(out, "load averages:")

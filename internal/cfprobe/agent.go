@@ -26,12 +26,14 @@ type Agent struct {
 	log     logger
 	version string
 
-	mu       sync.RWMutex
-	probes   ProbeSnapshot
-	basic    BasicStats
-	basicAt  time.Time
-	prevNet  NetBytes
-	prevTime time.Time
+	mu         sync.RWMutex
+	probes     ProbeSnapshot
+	basic      BasicStats
+	basicAt    time.Time
+	prevNet    NetBytes
+	prevTime   time.Time
+	prevDisk   DiskIOCounters
+	prevDiskAt time.Time
 
 	samples    []map[string]any
 	lastReport time.Time
@@ -202,21 +204,41 @@ func (a *Agent) tick() {
 	}
 
 	rxMonthly, txMonthly := calcMonthlyTraffic(a.paths.TrafficFile, netNow, a.cfg.ResetDay, a.cfg.Interface)
-	m := a.buildMetrics(cpu, netNow, rxSpeed, txSpeed, rxMonthly, txMonthly)
+	reportInterval := time.Duration(a.cfg.ReportInterval) * time.Second
+	shouldReport := a.lastReport.IsZero() || now.Sub(a.lastReport) >= reportInterval
+	diskIO := DiskIOStats{}
+	if shouldReport {
+		diskIO = a.sampleDiskIO(now)
+	}
+	m := a.buildMetrics(cpu, netNow, rxSpeed, txSpeed, rxMonthly, txMonthly, diskIO)
 	if a.cfg.CollectInterval > 0 {
 		a.samples = append(a.samples, map[string]any{
 			"ts":      now.UnixMilli(),
 			"metrics": sampleMetricsToMap(m),
 		})
 	}
-	if a.lastReport.IsZero() || now.Sub(a.lastReport) >= time.Duration(a.cfg.ReportInterval)*time.Second {
+	if shouldReport {
 		a.report(m)
 		a.lastReport = now
 		a.samples = nil
 	}
 }
 
-func (a *Agent) buildMetrics(cpu string, netNow NetBytes, rxSpeed, txSpeed, rxMonthly, txMonthly uint64) Metrics {
+func (a *Agent) sampleDiskIO(now time.Time) DiskIOStats {
+	current := readDiskIOCounters(a.basic.DiskDevices)
+	if a.prevDiskAt.IsZero() {
+		a.prevDisk = current
+		a.prevDiskAt = now
+		return DiskIOStats{}
+	}
+	elapsed := now.Sub(a.prevDiskAt).Seconds()
+	stats := diskIOStatsFromCounters(a.prevDisk, current, elapsed)
+	a.prevDisk = current
+	a.prevDiskAt = now
+	return stats
+}
+
+func (a *Agent) buildMetrics(cpu string, netNow NetBytes, rxSpeed, txSpeed, rxMonthly, txMonthly uint64, diskIO DiskIOStats) Metrics {
 	a.mu.RLock()
 	probes := a.probes
 	a.mu.RUnlock()
@@ -229,6 +251,7 @@ func (a *Agent) buildMetrics(cpu string, netNow NetBytes, rxSpeed, txSpeed, rxMo
 		SwapUsed:     uintString(b.SwapUsedMB),
 		DiskTotal:    uintString(b.DiskTotalMB),
 		DiskUsed:     uintString(b.DiskUsedMB),
+		Disk:         diskIO,
 		LoadAvg:      firstNonEmpty(b.LoadAvg, "0 0 0"),
 		BootTime:     strconv.FormatInt(b.BootTimeMS, 10),
 		NetRX:        uintString(netNow.RX),
@@ -509,8 +532,11 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		if err := writeConfig(a.paths.ConfigFile, a.cfg); err != nil {
 			return err
 		}
+		now := time.Now()
 		a.prevNet = readNetBytes(a.cfg.Interface)
-		a.prevTime = time.Now()
+		a.prevTime = now
+		a.prevDisk = DiskIOCounters{}
+		a.prevDiskAt = time.Time{}
 		a.samples = nil
 		a.lastReport = time.Time{}
 		a.log.info("dynamic configuration applied md5=%s interface=%s", newMD5, firstNonEmpty(iface, "auto"))

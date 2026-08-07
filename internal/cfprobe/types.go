@@ -77,6 +77,7 @@ type Metrics struct {
 	SwapUsed     string
 	DiskTotal    string
 	DiskUsed     string
+	Disk         DiskIOStats
 	LoadAvg      string
 	BootTime     string
 	NetRX        string
@@ -113,6 +114,7 @@ type BasicStats struct {
 	SwapUsedMB  uint64
 	DiskTotalMB uint64
 	DiskUsedMB  uint64
+	DiskDevices []DiskDeviceRef
 	LoadAvg     string
 	BootTimeMS  int64
 	OSName      string
@@ -129,4 +131,31 @@ type BasicStats struct {
 type NetBytes struct {
 	RX uint64
 	TX uint64
+}
+
+type DiskDeviceRef struct {
+	Key   string
+	Major uint64
+	Minor uint64
+}
+
+type DiskIOCounters struct {
+	ReadBytes   uint64
+	WriteBytes  uint64
+	ReadOps     uint64
+	WriteOps    uint64
+	ReadTimeMS  uint64
+	WriteTimeMS uint64
+	IOTicksMS   uint64
+	DeviceCount int
+	Fingerprint string
+}
+
+type DiskIOStats struct {
+	ReadBps   uint64  `json:"read_bps"`
+	WriteBps  uint64  `json:"write_bps"`
+	ReadIOPS  float64 `json:"read_iops"`
+	WriteIOPS float64 `json:"write_iops"`
+	AwaitMS   float64 `json:"await_ms"`
+	Util      float64 `json:"util"`
 }

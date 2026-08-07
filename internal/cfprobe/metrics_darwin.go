@@ -326,6 +326,10 @@ func readNetBytes(ifaces string) NetBytes {
 	return total
 }
 
+func readDiskIOCounters(_ []DiskDeviceRef) DiskIOCounters {
+	return DiskIOCounters{}
+}
+
 func darwinMemoryMB() (uint64, uint64) {
 	total := parseFirstUint(commandOutput("sysctl", "-n", "hw.memsize")) / 1024 / 1024
 	pageSize := uint64(4096)

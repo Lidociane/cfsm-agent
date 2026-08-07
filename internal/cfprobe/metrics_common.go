@@ -3,6 +3,7 @@ package cfprobe
 import (
 	"bufio"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -192,6 +193,7 @@ func metricsToMap(m Metrics) map[string]any {
 		"swap_used":      m.SwapUsed,
 		"disk_total":     m.DiskTotal,
 		"disk_used":      m.DiskUsed,
+		"disk":           m.Disk,
 		"load_avg":       m.LoadAvg,
 		"boot_time":      m.BootTime,
 		"net_rx":         m.NetRX,
@@ -220,6 +222,68 @@ func metricsToMap(m Metrics) map[string]any {
 		"loss_cm":        m.LossCM,
 		"loss_bd":        m.LossBD,
 	}
+}
+
+func diskIOStatsFromCounters(prev, current DiskIOCounters, elapsedSeconds float64) DiskIOStats {
+	if elapsedSeconds <= 0 || prev.DeviceCount == 0 || current.DeviceCount == 0 {
+		return DiskIOStats{}
+	}
+	if prev.Fingerprint != "" && current.Fingerprint != "" && prev.Fingerprint != current.Fingerprint {
+		return DiskIOStats{}
+	}
+
+	readBytes := counterDelta(prev.ReadBytes, current.ReadBytes)
+	writeBytes := counterDelta(prev.WriteBytes, current.WriteBytes)
+	readOps := counterDelta(prev.ReadOps, current.ReadOps)
+	writeOps := counterDelta(prev.WriteOps, current.WriteOps)
+	readTime := counterDelta(prev.ReadTimeMS, current.ReadTimeMS)
+	writeTime := counterDelta(prev.WriteTimeMS, current.WriteTimeMS)
+	ioTicks := counterDelta(prev.IOTicksMS, current.IOTicksMS)
+
+	totalOps := readOps + writeOps
+	await := 0.0
+	if totalOps > 0 {
+		await = float64(readTime+writeTime) / float64(totalOps)
+	}
+
+	deviceCount := current.DeviceCount
+	if deviceCount < 1 {
+		deviceCount = 1
+	}
+	util := float64(ioTicks) / elapsedSeconds / 10 / float64(deviceCount)
+
+	return DiskIOStats{
+		ReadBps:   uint64(float64(readBytes) / elapsedSeconds),
+		WriteBps:  uint64(float64(writeBytes) / elapsedSeconds),
+		ReadIOPS:  roundMetric(float64(readOps) / elapsedSeconds),
+		WriteIOPS: roundMetric(float64(writeOps) / elapsedSeconds),
+		AwaitMS:   roundMetric(await),
+		Util:      roundMetric(clampMetric(util, 0, 100)),
+	}
+}
+
+func counterDelta(prev, current uint64) uint64 {
+	if current < prev {
+		return 0
+	}
+	return current - prev
+}
+
+func roundMetric(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	return math.Round(v*100) / 100
+}
+
+func clampMetric(v, minValue, maxValue float64) float64 {
+	if v < minValue {
+		return minValue
+	}
+	if v > maxValue {
+		return maxValue
+	}
+	return v
 }
 
 func sampleMetricsToMap(m Metrics) map[string]any {

@@ -67,6 +67,10 @@ func readNetBytes(ifaces string) NetBytes {
 	return total
 }
 
+func readDiskIOCounters(_ []DiskDeviceRef) DiskIOCounters {
+	return DiskIOCounters{}
+}
+
 func freebsdMemoryMB() (uint64, uint64) {
 	v, err := gopsutilMem.VirtualMemory()
 	if err != nil {

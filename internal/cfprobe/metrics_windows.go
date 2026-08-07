@@ -72,6 +72,10 @@ func readNetBytes(ifaces string) NetBytes {
 	return total
 }
 
+func readDiskIOCounters(_ []DiskDeviceRef) DiskIOCounters {
+	return DiskIOCounters{}
+}
+
 func windowsOSName() string {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
 	if err != nil {
