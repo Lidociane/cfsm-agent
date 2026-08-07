@@ -85,6 +85,17 @@ run_payload() {
     "$bin" "$@"
 }
 
+run_payload_checked() {
+    err_file="$1"
+    shift
+    if run_payload "$@" 2>"$err_file"; then
+        return 0
+    else
+        rc=$?
+        return "$rc"
+    fi
+}
+
 dir_has_noexec() {
     dir="$1"
     if command -v findmnt >/dev/null 2>&1; then
@@ -111,7 +122,7 @@ stage_and_run_payload() {
         rm -f "$stage"
         return 125
     }
-    if run_payload "$stage" "$@" 2>"$stage_err"; then
+    if run_payload_checked "$stage_err" "$stage" "$@"; then
         rc=0
     else
         rc=$?
@@ -164,7 +175,7 @@ chmod +x "$tmp"
 
 status=126
 if ! dir_has_noexec "$tmp_dir"; then
-    if run_payload "$tmp" "$@" 2>"$tmp_err"; then
+    if run_payload_checked "$tmp_err" "$tmp" "$@"; then
         exit 0
     fi
     status=$?
