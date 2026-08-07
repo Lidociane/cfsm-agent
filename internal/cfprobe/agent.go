@@ -334,8 +334,7 @@ func (a *Agent) report(m Metrics) {
 	req.Header.Set("X-Agent-Version", a.version)
 	req.Header.Set("X-Agent-Config-Md5", firstNonEmpty(a.cfg.ConfigMD5, "none"))
 
-	client := http.Client{Timeout: 8 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := sharedPublicDNSHTTPClient(8 * time.Second).Do(req)
 	if err != nil {
 		a.log.warnf("report failed: %v", err)
 		return

@@ -29,7 +29,23 @@ const updateDNSServerEnv = "CF_PROBE_UPDATE_DNS"
 var (
 	updatePreferV4Once sync.Once
 	updateHasIPv4      bool
+
+	sharedClientsMu sync.Mutex
+	sharedClients   = map[time.Duration]*http.Client{}
 )
+
+// sharedPublicDNSHTTPClient 返回按 timeout 缓存的共用客户端，
+// 供上报等高频调用复用 TCP 连接，避免每次重新解析和握手。
+func sharedPublicDNSHTTPClient(timeout time.Duration) *http.Client {
+	sharedClientsMu.Lock()
+	defer sharedClientsMu.Unlock()
+	if client := sharedClients[timeout]; client != nil {
+		return client
+	}
+	client := newUpdateHTTPClient(timeout)
+	sharedClients[timeout] = client
+	return client
+}
 
 // normalizeUpdateDNSServer 将 DNS 服务器字符串规范化为 host:port 形式。
 func normalizeUpdateDNSServer(s string) string {
