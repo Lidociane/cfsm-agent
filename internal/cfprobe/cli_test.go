@@ -76,3 +76,18 @@ func TestParseInstallOptionsInstallProxy(t *testing.T) {
 		t.Fatalf("UpdateProxy = %q", got.UpdateProxy)
 	}
 }
+
+func TestParseInstallOptionsTracksExplicitFlags(t *testing.T) {
+	got, err := parseInstallOptions([]string{"-auto_update=1", "--auto-update=1", "-collect=5", "--install-ghproxy=https://gh-proxy.example.com"})
+	if err != nil {
+		t.Fatalf("parseInstallOptions() error = %v", err)
+	}
+	for _, name := range []string{"auto_update", "collect_interval", "install_ghproxy"} {
+		if !got.Explicit[name] {
+			t.Fatalf("Explicit[%q] = false, want true (all: %v)", name, got.Explicit)
+		}
+	}
+	if got.Explicit["reset_day"] || got.Explicit["interface"] {
+		t.Fatalf("unexpected explicit flags: %v", got.Explicit)
+	}
+}

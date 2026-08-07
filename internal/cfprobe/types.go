@@ -52,6 +52,7 @@ type InstallOptions struct {
 	RXCorrectionGB string
 	TXCorrectionGB string
 	NoStart        bool
+	Explicit       map[string]bool
 }
 
 type ProbeResult struct {

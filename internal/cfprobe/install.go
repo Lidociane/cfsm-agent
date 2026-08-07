@@ -29,15 +29,13 @@ func Install(opts InstallOptions, version string) error {
 	}
 
 	existing, existingPath, existingErr := readInstallConfig(paths)
-	usingExistingConfig := existingErr == nil && (opts.ServerID == "" || opts.Secret == "" || opts.WorkerURL == "")
-	updateProxy := opts.UpdateProxy
+	usingExistingConfig := existingErr == nil
 	if usingExistingConfig {
 		fmt.Printf("[INFO] Config source: %s\n", existingPath)
 		fmt.Printf("[INFO] 检测到已有配置，沿用 %s\n", paths.ConfigFile)
+		flagConfig := opts.Config
 		opts.Config = existing
-		if updateProxy != "" {
-			opts.UpdateProxy = updateProxy
-		}
+		mergeExplicitInstallConfig(&opts.Config, flagConfig, opts.Explicit)
 	} else if opts.ServerID == "" || opts.Secret == "" || opts.WorkerURL == "" {
 		printUsage(os.Stderr)
 		return errors.New("运行所需的 -id/-secret/-url 参数不完整")
@@ -79,6 +77,39 @@ func Install(opts InstallOptions, version string) error {
 	}
 	printInstallSummary(paths, opts)
 	return nil
+}
+
+func mergeExplicitInstallConfig(dst *Config, src Config, explicit map[string]bool) {
+	for name := range explicit {
+		switch name {
+		case "id":
+			dst.ServerID = src.ServerID
+		case "secret":
+			dst.Secret = src.Secret
+		case "url":
+			dst.WorkerURL = src.WorkerURL
+		case "interval":
+			dst.ReportInterval = src.ReportInterval
+		case "collect_interval":
+			dst.CollectInterval = src.CollectInterval
+		case "ct":
+			dst.CTNode = src.CTNode
+		case "cu":
+			dst.CUNode = src.CUNode
+		case "cm":
+			dst.CMNode = src.CMNode
+		case "bd":
+			dst.BDNode = src.BDNode
+		case "interface":
+			dst.Interface = src.Interface
+		case "reset_day":
+			dst.ResetDay = src.ResetDay
+		case "auto_update":
+			dst.AutoUpdate = src.AutoUpdate
+		case "install_ghproxy":
+			dst.UpdateProxy = src.UpdateProxy
+		}
+	}
 }
 
 func Uninstall(version string) error {
@@ -353,12 +384,14 @@ command_args="run -debug=%s"
 pidfile="/run/%s.pid"
 retry="SIGTERM/30"
 supervisor=supervise-daemon
+output_log="%s"
+error_log="%s"
 
 depend() {
     need net
     after network
 }
-`, paths.BinaryFile, boolInt(debug), paths.ServiceName), 0o755)
+`, paths.BinaryFile, boolInt(debug), paths.ServiceName, paths.LogFile, paths.LogFile), 0o755)
 }
 
 func writeProcdService(paths Paths, debug bool) error {

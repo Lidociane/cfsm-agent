@@ -143,6 +143,8 @@ func Run(configFile string, debug bool, version string) error {
 	go a.networkWorker(ctx)
 	if cfg.AutoUpdate {
 		go a.autoUpdateWorker(ctx)
+	} else {
+		a.log.info("auto update disabled: local AUTO_UPDATE=0")
 	}
 	return a.loop(ctx)
 }

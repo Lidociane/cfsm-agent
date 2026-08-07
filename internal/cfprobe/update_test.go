@@ -2,7 +2,6 @@ package cfprobe
 
 import (
 	"net/http"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -102,51 +101,25 @@ func TestSelectLatestSnapshotRelease(t *testing.T) {
 	}
 }
 
-func TestUpdateInstallScriptURL(t *testing.T) {
-	got, err := updateInstallScriptURL("linux", "")
+func TestUpdateAssetDownloadURL(t *testing.T) {
+	got, err := updateAssetDownloadURL("v1.2.3", "cf-probe-linux-amd64", "")
 	if err != nil {
-		t.Fatalf("updateInstallScriptURL(linux) error = %v", err)
+		t.Fatalf("updateAssetDownloadURL() error = %v", err)
 	}
-	if got != "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh" {
-		t.Fatalf("linux script url = %q", got)
-	}
-
-	got, err = updateInstallScriptURL("windows", "")
-	if err != nil {
-		t.Fatalf("updateInstallScriptURL(windows) error = %v", err)
-	}
-	if got != "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" {
-		t.Fatalf("windows script url = %q", got)
+	want := "https://github.com/huilang-me/cfsm-agent/releases/download/v1.2.3/cf-probe-linux-amd64"
+	if got != want {
+		t.Fatalf("asset url = %q, want %q", got, want)
 	}
 }
 
-func TestUpdateInstallScriptURLAppliesProxy(t *testing.T) {
-	got, err := updateInstallScriptURL("linux", "https://gh-proxy.example.com/")
+func TestUpdateAssetDownloadURLAppliesProxy(t *testing.T) {
+	got, err := updateAssetDownloadURL("v1.2.3", "cf-probe-linux-amd64", "https://gh-proxy.example.com/")
 	if err != nil {
-		t.Fatalf("updateInstallScriptURL(linux) error = %v", err)
+		t.Fatalf("updateAssetDownloadURL() error = %v", err)
 	}
-	want := "https://gh-proxy.example.com/https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh"
+	want := "https://gh-proxy.example.com/https://github.com/huilang-me/cfsm-agent/releases/download/v1.2.3/cf-probe-linux-amd64"
 	if got != want {
-		t.Fatalf("proxied script url = %q, want %q", got, want)
-	}
-}
-
-func TestQuoteShellArgs(t *testing.T) {
-	got := quoteShellArgs([]string{"install", "--install-version=v1.2.3", "--install-ghproxy=https://gh-proxy.example.com"})
-	want := `'install' '--install-version=v1.2.3' '--install-ghproxy=https://gh-proxy.example.com'`
-	if runtime.GOOS == "windows" {
-		want = `"install" "--install-version=v1.2.3" "--install-ghproxy=https://gh-proxy.example.com"`
-	}
-	if got != want {
-		t.Fatalf("quoteShellArgs() = %q, want %q", got, want)
-	}
-}
-
-func TestPowerShellArgs(t *testing.T) {
-	got := powerShellArgs([]string{"install", "--install-version=Snapshot-2608051300"})
-	want := "'install' '--install-version=Snapshot-2608051300'"
-	if got != want {
-		t.Fatalf("powerShellArgs() = %q, want %q", got, want)
+		t.Fatalf("proxied asset url = %q, want %q", got, want)
 	}
 }
 

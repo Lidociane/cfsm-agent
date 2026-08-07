@@ -69,16 +69,11 @@ func (a *Agent) autoUpdateWorker(ctx context.Context) {
 }
 
 func (a *Agent) checkAndScheduleAgentUpdate(reason string) {
-	if !a.cfg.AutoUpdate {
-		a.log.warnf("auto update ignored: local AUTO_UPDATE=0")
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	candidate, ok, err := checkLatestUpdate(ctx, a.version, a.cfg.UpdateProxy)
+	candidate, ok, err := checkLatestUpdate(ctx, a.version)
 	if err != nil {
-		a.log.warnf("auto update check failed: %v", err)
+		a.log.info("auto update check failed reason=%s: %v", reason, err)
 		return
 	}
 	if !ok {
@@ -89,13 +84,13 @@ func (a *Agent) checkAndScheduleAgentUpdate(reason string) {
 	a.scheduleAgentUpdate(candidate, reason)
 }
 
-func checkLatestUpdate(ctx context.Context, currentVersion, proxy string) (updateCandidate, bool, error) {
+func checkLatestUpdate(ctx context.Context, currentVersion string) (updateCandidate, bool, error) {
 	owner, name, err := splitUpdateRepoSlug(defaultUpdateRepo)
 	if err != nil {
 		return updateCandidate{}, false, err
 	}
 	assetName := expectedUpdateAssetName(runtime.GOOS, runtime.GOARCH)
-	releases, err := listGitHubReleases(ctx, owner, name, proxy)
+	releases, err := listGitHubReleases(ctx, owner, name)
 	if err != nil {
 		return updateCandidate{}, false, err
 	}
@@ -119,13 +114,14 @@ func checkLatestUpdate(ctx context.Context, currentVersion, proxy string) (updat
 	return candidate, true, nil
 }
 
-func listGitHubReleases(ctx context.Context, owner, repo, proxy string) ([]githubRelease, error) {
-	client := http.Client{Timeout: 30 * time.Second}
+// listGitHubReleases 不走 UPDATE_PROXY：gh-proxy 类服务只代理 github.com 的
+// 文件下载，不支持 api.github.com；API 直连失败的场景由内置公共 DNS 解析兜底。
+func listGitHubReleases(ctx context.Context, owner, repo string) ([]githubRelease, error) {
+	client := newUpdateHTTPClient(30 * time.Second)
 	var releases []githubRelease
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100&page=%d",
 			githubAPIBaseURL, url.PathEscape(owner), url.PathEscape(repo), page)
-		endpoint = applyURLProxy(endpoint, proxy)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return nil, err
@@ -233,20 +229,21 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string) {
 	if data, err := os.ReadFile(lockFile); err == nil {
 		last := atoi64Default(string(data), 0)
 		if time.Duration(now-last)*time.Second < autoUpdateLockTTL {
-			a.log.warnf("auto update already scheduled recently")
+			a.log.info("auto update already scheduled recently")
 			return
 		}
 	}
 
-	scriptURL, err := updateInstallScriptURL(runtime.GOOS, a.cfg.UpdateProxy)
+	binPath, err := fetchUpdateBinary(a.paths.ConfigDir, candidate, a.cfg.UpdateProxy)
 	if err != nil {
-		a.log.warnf("auto update skipped: %v", err)
+		a.log.info("auto update download failed target=%s: %v", candidate.TagName, err)
 		return
 	}
 
-	method, err := scheduleInstallScript(a.paths.ServiceName, scriptURL, candidate.TagName, a.cfg.UpdateProxy, now)
+	method, err := scheduleUpdateInstall(a.paths.ServiceName, a.paths.LogFile, binPath, now)
 	if err != nil {
-		a.log.warnf("schedule update failed: %v", err)
+		_ = os.Remove(binPath)
+		a.log.info("schedule update failed: %v", err)
 		return
 	}
 	_ = os.MkdirAll(a.paths.ConfigDir, 0o755)
@@ -255,20 +252,74 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string) {
 		candidate.TagName, candidate.AssetName, method, reason, autoUpdateDelay)
 }
 
-func scheduleInstallScript(serviceName, scriptURL, tag, proxy string, now int64) (string, error) {
+func scheduleUpdateInstall(serviceName, logFile, binPath string, now int64) (string, error) {
 	if runtime.GOOS == "windows" {
-		return scheduleWindowsInstallScript(scriptURL, tag, proxy)
+		return scheduleWindowsUpdateInstall(binPath)
 	}
-	return scheduleUnixInstallScript(serviceName, scriptURL, tag, proxy, now)
+	return scheduleUnixUpdateInstall(serviceName, logFile, binPath, now)
 }
 
-func scheduleUnixInstallScript(serviceName, scriptURL, tag, proxy string, now int64) (string, error) {
-	args := []string{"install", "--install-version=" + tag}
-	if proxy != "" {
-		args = append(args, "--install-ghproxy="+proxy)
+// fetchUpdateBinary 通过更新专用 HTTP 客户端（内置公共 DNS 解析）下载目标版本
+// 二进制到配置目录，规避 github.com 无法解析/访问的问题。
+func fetchUpdateBinary(configDir string, candidate updateCandidate, proxy string) (string, error) {
+	rawURL, err := updateAssetDownloadURL(candidate.TagName, candidate.AssetName, proxy)
+	if err != nil {
+		return "", err
 	}
-	cmdLine := fmt.Sprintf("sleep %d; curl -fsSL --connect-timeout 5 -m 30 %s | sh -s -- %s",
-		int(autoUpdateDelay.Seconds()), quoteShell(scriptURL), quoteShellArgs(args))
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(configDir, "cf-probe-update.bin")
+	if runtime.GOOS == "windows" {
+		dest = filepath.Join(configDir, "cf-probe-update.exe")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := downloadToFile(ctx, newUpdateHTTPClient(5*time.Minute), rawURL, dest); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+func downloadToFile(ctx context.Context, client *http.Client, rawURL, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "cfsm-agent")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("download %s returned http %d", rawURL, resp.StatusCode)
+	}
+	tmp := dest + ".download"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, io.LimitReader(resp.Body, 512<<20))
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmp)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmp)
+		return closeErr
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dest)
+}
+
+func scheduleUnixUpdateInstall(serviceName, logFile, binPath string, now int64) (string, error) {
+	cmdLine := fmt.Sprintf("sleep %d; %s install; rm -f %s",
+		int(autoUpdateDelay.Seconds()), quoteShell(binPath), quoteShell(binPath))
 	if runtime.GOOS == "linux" && fileExists("/run/systemd/system") {
 		unit := fmt.Sprintf("%s-auto-update-%d", serviceName, now)
 		if commandExists("systemd-run") {
@@ -283,23 +334,22 @@ func scheduleUnixInstallScript(serviceName, scriptURL, tag, proxy string, now in
 		return scheduleSystemdUnit(unit, cmdLine)
 	}
 
-	cmd := exec.Command("sh", "-c", "nohup /bin/sh -c "+quoteShell(cmdLine)+" >/dev/null 2>&1 &")
+	nohupCmd := "nohup /bin/sh -c " + quoteShell(cmdLine) + " >/dev/null 2>&1 &"
+	if logFile != "" {
+		nohupCmd = "nohup /bin/sh -c " + quoteShell(cmdLine) + " >>" + quoteShell(logFile) + " 2>&1 &"
+	}
+	cmd := exec.Command("sh", "-c", nohupCmd)
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
 	return "nohup", nil
 }
 
-func scheduleWindowsInstallScript(scriptURL, tag, proxy string) (string, error) {
-	args := []string{"install", "--install-version=" + tag}
-	if proxy != "" {
-		args = append(args, "--install-ghproxy="+proxy)
-	}
+func scheduleWindowsUpdateInstall(binPath string) (string, error) {
 	script := strings.Join([]string{
 		fmt.Sprintf("Start-Sleep -Seconds %d", int(autoUpdateDelay.Seconds())),
-		"$script = Join-Path $env:TEMP 'install-cf-probe.ps1'",
-		"Invoke-WebRequest -Uri " + powerShellLiteral(scriptURL) + " -OutFile $script -UseBasicParsing",
-		"& PowerShell -NoProfile -ExecutionPolicy Bypass -File $script " + powerShellArgs(args),
+		"& " + powerShellLiteral(binPath) + " install",
+		"Remove-Item -Force " + powerShellLiteral(binPath) + " -ErrorAction SilentlyContinue",
 	}, "; ")
 	cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script)
 	if err := cmd.Start(); err != nil {
@@ -309,17 +359,13 @@ func scheduleWindowsInstallScript(scriptURL, tag, proxy string) (string, error) 
 	return "powershell", nil
 }
 
-func updateInstallScriptURL(goos, proxy string) (string, error) {
+func updateAssetDownloadURL(tag, assetName, proxy string) (string, error) {
 	owner, repo, err := splitUpdateRepoSlug(defaultUpdateRepo)
 	if err != nil {
 		return "", err
 	}
-	name := "install.sh"
-	if goos == "windows" {
-		name = "install.ps1"
-	}
-	raw := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/main/%s",
-		url.PathEscape(owner), url.PathEscape(repo), name)
+	raw := fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s",
+		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(tag), url.PathEscape(assetName))
 	return applyURLProxy(raw, proxy), nil
 }
 
@@ -333,22 +379,6 @@ func splitUpdateRepoSlug(slug string) (string, string, error) {
 
 func powerShellLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
-
-func quoteShellArgs(args []string) string {
-	quoted := make([]string, 0, len(args))
-	for _, arg := range args {
-		quoted = append(quoted, quoteShell(arg))
-	}
-	return strings.Join(quoted, " ")
-}
-
-func powerShellArgs(args []string) string {
-	quoted := make([]string, 0, len(args))
-	for _, arg := range args {
-		quoted = append(quoted, powerShellLiteral(arg))
-	}
-	return strings.Join(quoted, " ")
 }
 
 func applyURLProxy(raw, proxy string) string {

@@ -6,6 +6,51 @@ import (
 	"testing"
 )
 
+func TestMergeExplicitInstallConfig(t *testing.T) {
+	existing := Config{
+		ServerID:       "sid",
+		Secret:         "secret",
+		WorkerURL:      "https://worker.example.com/report",
+		ReportInterval: 120,
+		ResetDay:       5,
+		AutoUpdate:     false,
+	}
+	flagConfig := Config{
+		ReportInterval: defaultReportIntervalSec,
+		ResetDay:       1,
+		AutoUpdate:     true,
+		UpdateProxy:    "https://gh-proxy.example.com",
+	}
+
+	merged := existing
+	mergeExplicitInstallConfig(&merged, flagConfig, map[string]bool{"auto_update": true})
+	if !merged.AutoUpdate {
+		t.Fatal("AutoUpdate = false, want true when -auto_update=1 is explicit")
+	}
+	if merged.ReportInterval != existing.ReportInterval || merged.ResetDay != existing.ResetDay {
+		t.Fatalf("non-explicit fields changed: %+v", merged)
+	}
+	if merged.UpdateProxy != "" {
+		t.Fatalf("UpdateProxy = %q, want preserved empty", merged.UpdateProxy)
+	}
+
+	merged = existing
+	mergeExplicitInstallConfig(&merged, flagConfig, map[string]bool{"install_ghproxy": true})
+	if merged.UpdateProxy != flagConfig.UpdateProxy {
+		t.Fatalf("UpdateProxy = %q, want %q", merged.UpdateProxy, flagConfig.UpdateProxy)
+	}
+
+	existingAuto := existing
+	existingAuto.AutoUpdate = true
+	merged = existingAuto
+	off := flagConfig
+	off.AutoUpdate = false
+	mergeExplicitInstallConfig(&merged, off, map[string]bool{"auto_update": true})
+	if merged.AutoUpdate {
+		t.Fatal("AutoUpdate = true, want false when -auto_update=0 is explicit")
+	}
+}
+
 func TestMigrateTrafficMovesLegacyTraffic(t *testing.T) {
 	tmp := t.TempDir()
 	oldDir := filepath.Join(tmp, "old")

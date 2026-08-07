@@ -82,6 +82,10 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 		printUsage(os.Stderr)
 		return opts, err
 	}
+	opts.Explicit = map[string]bool{}
+	fs.Visit(func(f *flag.Flag) {
+		opts.Explicit[canonicalInstallFlag(f.Name)] = true
+	})
 	var err error
 	opts.AutoUpdate, err = normalizeBinaryValue(autoUpdate, false)
 	if err != nil {
@@ -97,6 +101,18 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	}
 	normalizeConfigIntervals(&opts.Config)
 	return opts, nil
+}
+
+func canonicalInstallFlag(name string) string {
+	name = strings.ReplaceAll(name, "-", "_")
+	switch name {
+	case "collect":
+		return "collect_interval"
+	case "interfaces", "iface":
+		return "interface"
+	default:
+		return name
+	}
 }
 
 func parseRunOptions(args []string) (bool, string, error) {
