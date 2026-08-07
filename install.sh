@@ -177,8 +177,9 @@ status=126
 if ! dir_has_noexec "$tmp_dir"; then
     if run_payload_checked "$tmp_err" "$tmp" "$@"; then
         exit 0
+    else
+        status=$?
     fi
-    status=$?
     if [ "$status" -ne 126 ]; then
         cat "$tmp_err" >&2 2>/dev/null || true
         exit "$status"
