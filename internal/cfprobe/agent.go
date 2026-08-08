@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os/signal"
@@ -334,7 +333,7 @@ func (a *Agent) report(m Metrics) {
 	req.Header.Set("X-Agent-Version", a.version)
 	req.Header.Set("X-Agent-Config-Md5", firstNonEmpty(a.cfg.ConfigMD5, "none"))
 
-	resp, err := sharedPublicDNSHTTPClient(8 * time.Second).Do(req)
+	resp, err := sharedReportHTTPClient(8*time.Second, usePublicDNSResolver(a.cfg)).Do(req)
 	if err != nil {
 		a.log.warnf("report failed: %v", err)
 		return
@@ -374,8 +373,9 @@ func (a *Agent) networkWorker(ctx context.Context) {
 			snap := ProbeSnapshot{}
 			needUpdate := false
 			if lastIP.IsZero() || now.Sub(lastIP) >= 10*time.Minute {
-				snap.IPv4 = getCFTraceIP("tcp4")
-				snap.IPv6 = getCFTraceIP("tcp6")
+				usePublicDNS := usePublicDNSResolver(a.cfg)
+				snap.IPv4 = lookupPublicIP("tcp4", a.log, usePublicDNS)
+				snap.IPv6 = lookupPublicIP("tcp6", a.log, usePublicDNS)
 				lastIP = now
 				needUpdate = true
 			}
@@ -416,30 +416,6 @@ func (a *Agent) networkWorker(ctx context.Context) {
 			}
 		}
 	}
-}
-
-func getCFTraceIP(network string) string {
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	transport := &http.Transport{
-		DisableKeepAlives: true,
-		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, addr)
-		},
-	}
-	defer transport.CloseIdleConnections()
-	client := http.Client{Timeout: 5 * time.Second, Transport: transport}
-	resp, err := client.Get("https://cloudflare.com/cdn-cgi/trace")
-	if err != nil {
-		return "0"
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "ip=") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "ip="))
-		}
-	}
-	return "0"
 }
 
 var remoteBodyRE = regexp.MustCompile(`^[A-Za-z0-9_=&.,:%+\-\*\?\[\]]*$`)

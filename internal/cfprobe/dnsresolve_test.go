@@ -44,6 +44,20 @@ func TestUpdateResolverServersEnvOverride(t *testing.T) {
 	}
 }
 
+func TestUsePublicDNSResolver(t *testing.T) {
+	t.Setenv(updateDNSServerEnv, "")
+	if usePublicDNSResolver(Config{}) {
+		t.Fatal("usePublicDNSResolver() = true, want false without ghproxy")
+	}
+	if !usePublicDNSResolver(Config{UpdateProxy: "https://gh-proxy.example.com"}) {
+		t.Fatal("usePublicDNSResolver() = false, want true with ghproxy")
+	}
+	t.Setenv(updateDNSServerEnv, "223.5.5.5")
+	if !usePublicDNSResolver(Config{}) {
+		t.Fatal("usePublicDNSResolver() = false, want true with env override")
+	}
+}
+
 func TestDownloadToFile(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("echo ok"))

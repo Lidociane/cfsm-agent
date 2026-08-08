@@ -31,19 +31,36 @@ var (
 	updateHasIPv4      bool
 
 	sharedClientsMu sync.Mutex
-	sharedClients   = map[time.Duration]*http.Client{}
+	sharedClients   = map[sharedClientKey]*http.Client{}
 )
 
-// sharedPublicDNSHTTPClient 返回按 timeout 缓存的共用客户端，
+type sharedClientKey struct {
+	timeout      time.Duration
+	usePublicDNS bool
+}
+
+// usePublicDNSResolver 决定是否启用内置公共 DNS 轮询解析。
+// 仅在配置了 --install-ghproxy（UpdateProxy 非空，通常为国内服务器）或
+// 显式设置 CF_PROBE_UPDATE_DNS 时启用；海外服务器直接使用系统原生 DNS，
+// 避免公共 DNS 出口差异导致解析到非最优地址甚至解析失败。
+func usePublicDNSResolver(cfg Config) bool {
+	if strings.TrimSpace(os.Getenv(updateDNSServerEnv)) != "" {
+		return true
+	}
+	return strings.TrimSpace(cfg.UpdateProxy) != ""
+}
+
+// sharedReportHTTPClient 返回按 timeout 和 DNS 模式缓存的共用客户端，
 // 供上报等高频调用复用 TCP 连接，避免每次重新解析和握手。
-func sharedPublicDNSHTTPClient(timeout time.Duration) *http.Client {
+func sharedReportHTTPClient(timeout time.Duration, usePublicDNS bool) *http.Client {
 	sharedClientsMu.Lock()
 	defer sharedClientsMu.Unlock()
-	if client := sharedClients[timeout]; client != nil {
+	key := sharedClientKey{timeout: timeout, usePublicDNS: usePublicDNS}
+	if client := sharedClients[key]; client != nil {
 		return client
 	}
-	client := newUpdateHTTPClient(timeout)
-	sharedClients[timeout] = client
+	client := newUpdateHTTPClient(timeout, usePublicDNS)
+	sharedClients[key] = client
 	return client
 }
 
@@ -85,16 +102,24 @@ func newUpdateResolver() *net.Resolver {
 	}
 }
 
-// newUpdateHTTPClient 返回更新检查/下载专用的 HTTP 客户端：
-// 优先使用内置公共 DNS 解析，失败时回退系统 DNS，并逐个尝试解析到的 IP。
-func newUpdateHTTPClient(timeout time.Duration) *http.Client {
+// newUpdateHTTPClient 返回更新检查/下载专用的 HTTP 客户端。
+// usePublicDNS 为 true 时优先使用内置公共 DNS 解析，失败时回退系统 DNS，
+// 并逐个尝试解析到的 IP；为 false 时使用系统原生 DNS 的默认拨号行为。
+func newUpdateHTTPClient(timeout time.Duration, usePublicDNS bool) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	resolver := newUpdateResolver()
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          8,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	if usePublicDNS {
+		resolver := newUpdateResolver()
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
@@ -116,13 +141,11 @@ func newUpdateHTTPClient(timeout time.Duration) *http.Client {
 				}
 				lastErr = err
 			}
+			if lastErr == nil {
+				return nil, fmt.Errorf("no addresses resolved for %s", host)
+			}
 			return nil, fmt.Errorf("failed to dial %s: %w", host, lastErr)
-		},
-		MaxIdleConns:          8,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,
+		}
 	}
 	return &http.Client{Transport: transport, Timeout: timeout}
 }

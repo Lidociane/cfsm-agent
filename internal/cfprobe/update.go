@@ -71,7 +71,7 @@ func (a *Agent) autoUpdateWorker(ctx context.Context) {
 func (a *Agent) checkAndScheduleAgentUpdate(reason string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	candidate, ok, err := checkLatestUpdate(ctx, a.version)
+	candidate, ok, err := checkLatestUpdate(ctx, a.version, usePublicDNSResolver(a.cfg))
 	if err != nil {
 		a.log.info("auto update check failed reason=%s: %v", reason, err)
 		return
@@ -84,13 +84,13 @@ func (a *Agent) checkAndScheduleAgentUpdate(reason string) {
 	a.scheduleAgentUpdate(candidate, reason)
 }
 
-func checkLatestUpdate(ctx context.Context, currentVersion string) (updateCandidate, bool, error) {
+func checkLatestUpdate(ctx context.Context, currentVersion string, usePublicDNS bool) (updateCandidate, bool, error) {
 	owner, name, err := splitUpdateRepoSlug(defaultUpdateRepo)
 	if err != nil {
 		return updateCandidate{}, false, err
 	}
 	assetName := expectedUpdateAssetName(runtime.GOOS, runtime.GOARCH)
-	releases, err := listGitHubReleases(ctx, owner, name)
+	releases, err := listGitHubReleases(ctx, owner, name, usePublicDNS)
 	if err != nil {
 		return updateCandidate{}, false, err
 	}
@@ -115,9 +115,10 @@ func checkLatestUpdate(ctx context.Context, currentVersion string) (updateCandid
 }
 
 // listGitHubReleases 不走 UPDATE_PROXY：gh-proxy 类服务只代理 github.com 的
-// 文件下载，不支持 api.github.com；API 直连失败的场景由内置公共 DNS 解析兜底。
-func listGitHubReleases(ctx context.Context, owner, repo string) ([]githubRelease, error) {
-	client := newUpdateHTTPClient(30 * time.Second)
+// 文件下载，不支持 api.github.com；usePublicDNS 为 true 时由内置公共 DNS 解析兜底，
+// 否则使用系统原生 DNS。
+func listGitHubReleases(ctx context.Context, owner, repo string, usePublicDNS bool) ([]githubRelease, error) {
+	client := newUpdateHTTPClient(30*time.Second, usePublicDNS)
 	var releases []githubRelease
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=100&page=%d",
@@ -234,7 +235,7 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string) {
 		}
 	}
 
-	binPath, err := fetchUpdateBinary(a.paths.ConfigDir, candidate, a.cfg.UpdateProxy)
+	binPath, err := fetchUpdateBinary(a.paths.ConfigDir, candidate, a.cfg.UpdateProxy, usePublicDNSResolver(a.cfg))
 	if err != nil {
 		a.log.info("auto update download failed target=%s: %v", candidate.TagName, err)
 		return
@@ -259,9 +260,9 @@ func scheduleUpdateInstall(serviceName, logFile, binPath string, now int64) (str
 	return scheduleUnixUpdateInstall(serviceName, logFile, binPath, now)
 }
 
-// fetchUpdateBinary 通过更新专用 HTTP 客户端（内置公共 DNS 解析）下载目标版本
-// 二进制到配置目录，规避 github.com 无法解析/访问的问题。
-func fetchUpdateBinary(configDir string, candidate updateCandidate, proxy string) (string, error) {
+// fetchUpdateBinary 通过更新专用 HTTP 客户端下载目标版本二进制到配置目录，
+// usePublicDNS 为 true 时使用内置公共 DNS 解析，规避 github.com 无法解析/访问的问题。
+func fetchUpdateBinary(configDir string, candidate updateCandidate, proxy string, usePublicDNS bool) (string, error) {
 	rawURL, err := updateAssetDownloadURL(candidate.TagName, candidate.AssetName, proxy)
 	if err != nil {
 		return "", err
@@ -275,7 +276,7 @@ func fetchUpdateBinary(configDir string, candidate updateCandidate, proxy string
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := downloadToFile(ctx, newUpdateHTTPClient(5*time.Minute), rawURL, dest); err != nil {
+	if err := downloadToFile(ctx, newUpdateHTTPClient(5*time.Minute, usePublicDNS), rawURL, dest); err != nil {
 		return "", err
 	}
 	return dest, nil
