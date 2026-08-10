@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const legacyDarwinLaunchdFile = "/Library/LaunchDaemons/com.cf.probe.plist"
@@ -169,23 +170,59 @@ func legacyFileContains(path, needle string) bool {
 }
 
 func legacyShellProcessRunning() bool {
-	return commandExists("pgrep") && commandOutput("pgrep", "-f", legacyShellScriptName) != ""
+	return len(legacyShellProcessIDs()) > 0
 }
 
 func stopLegacyShellProcesses() {
-	if commandExists("pkill") {
-		_ = runCommandQuiet("pkill", "-9", "-f", legacyShellScriptName)
-		return
-	}
-	for _, raw := range strings.Fields(commandOutput("pgrep", "-f", legacyShellScriptName)) {
-		pid, err := strconv.Atoi(raw)
-		if err != nil || pid <= 0 {
-			continue
-		}
+	for _, pid := range legacyShellProcessIDs() {
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
 			_ = proc.Kill()
 		}
 	}
+	for i := 0; i < 20; i++ {
+		if !legacyShellProcessRunning() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func legacyShellProcessIDs() []int {
+	if !commandExists("pgrep") {
+		return nil
+	}
+	return parseLegacyShellProcessIDs(commandOutput("pgrep", "-f", legacyUnixScriptFile), legacyProcessInCurrentNamespaces)
+}
+
+func parseLegacyShellProcessIDs(raw string, include func(int) bool) []int {
+	var pids []int
+	seen := map[int]bool{}
+	for _, raw := range strings.Fields(raw) {
+		pid, err := strconv.Atoi(raw)
+		if err != nil || pid <= 0 || pid == os.Getpid() || seen[pid] || !include(pid) {
+			continue
+		}
+		seen[pid] = true
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+func legacyProcessInCurrentNamespaces(pid int) bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	for _, ns := range []string{"pid", "mnt"} {
+		selfNS, err := os.Readlink(filepath.Join("/proc/self/ns", ns))
+		if err != nil {
+			return true
+		}
+		procNS, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "ns", ns))
+		if err != nil || procNS != selfNS {
+			return false
+		}
+	}
+	return true
 }
 
 func legacyRuntimeFiles() []string {
