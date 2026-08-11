@@ -12,19 +12,24 @@ import (
 func Install(opts InstallOptions, version string) error {
 	paths := defaultPaths()
 	printBanner(version)
-	if err := requireInstallPermission(); err != nil {
+	if err := requireInstallPermission(paths); err != nil {
+		return err
+	}
+	if err := checkInstallConflicts(paths); err != nil {
 		return err
 	}
 
-	if cleaned, residuals := cleanupLegacyInstall(paths); len(cleaned) > 0 || len(residuals) > 0 {
-		if len(cleaned) > 0 {
-			fmt.Printf("[INFO] Cleaned legacy shell probe artifacts: %s\n", strings.Join(cleaned, ", "))
-		}
-		if len(residuals) > 0 {
-			for _, item := range residuals {
-				fmt.Printf("[WARN] Legacy shell probe residual: %s\n", item)
+	if !paths.UserMode {
+		if cleaned, residuals := cleanupLegacyInstall(paths); len(cleaned) > 0 || len(residuals) > 0 {
+			if len(cleaned) > 0 {
+				fmt.Printf("[INFO] Cleaned legacy shell probe artifacts: %s\n", strings.Join(cleaned, ", "))
 			}
-			return fmt.Errorf("legacy shell probe cleanup incomplete: %s", strings.Join(residuals, ", "))
+			if len(residuals) > 0 {
+				for _, item := range residuals {
+					fmt.Printf("[WARN] Legacy shell probe residual: %s\n", item)
+				}
+				return fmt.Errorf("legacy shell probe cleanup incomplete: %s", strings.Join(residuals, ", "))
+			}
 		}
 	}
 
@@ -46,10 +51,16 @@ func Install(opts InstallOptions, version string) error {
 	normalizeConfigIntervals(&opts.Config)
 
 	fmt.Printf("[INFO] Platform: %s/%s (%s)\n", runtime.GOOS, runtime.GOARCH, platformName())
+	if paths.UserMode {
+		fmt.Printf("[INFO] Install mode: user (%s)\n", firstNonEmpty(paths.RunUser, "current"))
+	} else {
+		fmt.Println("[INFO] Install mode: system")
+	}
 	fmt.Printf("[INFO] Install binary: %s\n", paths.BinaryFile)
 	fmt.Printf("[INFO] Config file: %s\n", paths.ConfigFile)
 
 	stopService(paths)
+	stopCurrentUserProbeInstances()
 	if err := copySelfTo(paths.BinaryFile); err != nil {
 		return fmt.Errorf("安装二进制失败: %w", err)
 	}
@@ -115,7 +126,7 @@ func mergeExplicitInstallConfig(dst *Config, src Config, explicit map[string]boo
 func Uninstall(version string) error {
 	paths := defaultPaths()
 	printBanner(version)
-	if err := requireUninstallPermission(); err != nil {
+	if err := requireUninstallPermission(paths); err != nil {
 		return err
 	}
 	fmt.Printf("[INFO] 开始卸载 %s\n", paths.ServiceName)
@@ -240,10 +251,19 @@ func initSystem() string {
 	return "background"
 }
 
+func serviceSystem(paths Paths) string {
+	if paths.UserMode {
+		return "systemd-user"
+	}
+	return initSystem()
+}
+
 func writeService(paths Paths, debug bool) error {
-	switch initSystem() {
+	switch serviceSystem(paths) {
 	case "systemd":
 		return writeSystemdService(paths, debug)
+	case "systemd-user":
+		return writeSystemdUserService(paths, debug)
 	case "openrc":
 		return writeOpenRCService(paths, debug)
 	case "procd":
@@ -264,13 +284,19 @@ func writeService(paths Paths, debug bool) error {
 }
 
 func startService(paths Paths, debug bool) error {
-	switch initSystem() {
+	switch serviceSystem(paths) {
 	case "systemd":
 		if err := runCommand("systemctl", "daemon-reload"); err != nil {
 			return err
 		}
 		_ = runCommand("systemctl", "enable", paths.ServiceName+".service")
 		return runCommand("systemctl", "restart", paths.ServiceName+".service")
+	case "systemd-user":
+		if err := runCommand("systemctl", "--user", "daemon-reload"); err != nil {
+			return err
+		}
+		_ = runCommand("systemctl", "--user", "enable", paths.ServiceName+".service")
+		return runCommand("systemctl", "--user", "restart", paths.ServiceName+".service")
 	case "openrc":
 		_ = runCommand("rc-update", "add", paths.ServiceName, "default")
 		return runCommand("rc-service", paths.ServiceName, "restart")
@@ -299,10 +325,13 @@ func startService(paths Paths, debug bool) error {
 }
 
 func stopService(paths Paths) {
-	switch initSystem() {
+	switch serviceSystem(paths) {
 	case "systemd":
 		_ = runCommandQuiet("systemctl", "stop", paths.ServiceName+".service")
 		_ = runCommandQuiet("systemctl", "disable", paths.ServiceName+".service")
+	case "systemd-user":
+		_ = runCommandQuiet("systemctl", "--user", "stop", paths.ServiceName+".service")
+		_ = runCommandQuiet("systemctl", "--user", "disable", paths.ServiceName+".service")
 	case "openrc":
 		_ = runCommand("rc-service", paths.ServiceName, "stop")
 		_ = runCommand("rc-update", "del", paths.ServiceName, "default")
@@ -324,11 +353,15 @@ func stopService(paths Paths) {
 }
 
 func removeService(paths Paths) {
-	switch initSystem() {
+	switch serviceSystem(paths) {
 	case "systemd":
 		_ = os.Remove(paths.ServiceFile)
 		_ = runCommand("systemctl", "daemon-reload")
 		_ = runCommandQuiet("systemctl", "reset-failed", paths.ServiceName)
+	case "systemd-user":
+		_ = os.Remove(paths.ServiceFile)
+		_ = runCommandQuiet("systemctl", "--user", "daemon-reload")
+		_ = runCommandQuiet("systemctl", "--user", "reset-failed", paths.ServiceName)
 	case "openrc", "procd":
 		_ = os.Remove("/etc/init.d/" + paths.ServiceName)
 	case "launchd":
@@ -371,6 +404,30 @@ SyslogIdentifier=%s
 [Install]
 WantedBy=multi-user.target
 `, paths.BinaryFile, debugArg, paths.ServiceName)
+	return writeFileExecutable(paths.ServiceFile, content, 0o644)
+}
+
+func writeSystemdUserService(paths Paths, debug bool) error {
+	debugArg := "0"
+	if debug {
+		debugArg = "1"
+	}
+	content := fmt.Sprintf(`[Unit]
+Description=CF Server Monitor Probe Agent
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%s run -config=%s -debug=%s
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=%s
+
+[Install]
+WantedBy=default.target
+`, quoteSystemdExecArg(paths.BinaryFile), quoteSystemdExecArg(paths.ConfigFile), debugArg, paths.ServiceName)
 	return writeFileExecutable(paths.ServiceFile, content, 0o644)
 }
 

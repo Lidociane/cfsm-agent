@@ -241,7 +241,7 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string) {
 		return
 	}
 
-	method, err := scheduleUpdateInstall(a.paths.ServiceName, a.paths.LogFile, binPath, now)
+	method, err := scheduleUpdateInstall(a.paths, binPath, now)
 	if err != nil {
 		_ = os.Remove(binPath)
 		a.log.info("schedule update failed: %v", err)
@@ -253,11 +253,14 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string) {
 		candidate.TagName, candidate.AssetName, method, reason, autoUpdateDelay)
 }
 
-func scheduleUpdateInstall(serviceName, logFile, binPath string, now int64) (string, error) {
+func scheduleUpdateInstall(paths Paths, binPath string, now int64) (string, error) {
 	if runtime.GOOS == "windows" {
 		return scheduleWindowsUpdateInstall(binPath)
 	}
-	return scheduleUnixUpdateInstall(serviceName, logFile, binPath, now)
+	if paths.UserMode {
+		return scheduleUserModeUpdateInstall(paths, binPath)
+	}
+	return scheduleUnixUpdateInstall(paths.ServiceName, paths.LogFile, binPath, now)
 }
 
 // fetchUpdateBinary 通过更新专用 HTTP 客户端下载目标版本二进制到配置目录，
@@ -358,6 +361,31 @@ func scheduleWindowsUpdateInstall(binPath string) (string, error) {
 	}
 	_ = cmd.Process.Release()
 	return "powershell", nil
+}
+
+func scheduleUserModeUpdateInstall(paths Paths, binPath string) (string, error) {
+	if paths.BinaryFile == "" {
+		return "", errors.New("installed binary path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.BinaryFile), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(binPath, 0o755); err != nil {
+		return "", err
+	}
+	staged := paths.BinaryFile + ".update"
+	_ = os.Remove(staged)
+	if err := os.Rename(binPath, staged); err != nil {
+		return "", err
+	}
+	if err := os.Rename(staged, paths.BinaryFile); err != nil {
+		_ = os.Remove(staged)
+		return "", err
+	}
+	time.AfterFunc(autoUpdateDelay, func() {
+		os.Exit(42)
+	})
+	return "self-replace", nil
 }
 
 func updateAssetDownloadURL(tag, assetName, proxy string) (string, error) {

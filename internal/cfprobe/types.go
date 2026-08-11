@@ -44,6 +44,10 @@ type Paths struct {
 	LaunchdLabel    string
 	LaunchdUserFile string
 	LaunchdRootFile string
+	UserMode        bool
+	RunUser         string
+	RunUID          int
+	HomeDir         string
 }
 
 type InstallOptions struct {

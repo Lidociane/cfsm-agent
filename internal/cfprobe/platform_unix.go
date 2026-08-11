@@ -3,19 +3,29 @@
 package cfprobe
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func defaultPaths() Paths {
+	if !isRootUser() {
+		return currentUserPaths()
+	}
+	return systemDefaultPaths()
+}
+
+func systemDefaultPaths() Paths {
 	serviceName := serviceNameDefault
 	installDir := "/usr/local/bin"
 	if isOpenWrt() {
@@ -41,6 +51,42 @@ func defaultPaths() Paths {
 		LaunchdLabel:    "com.cfsm." + serviceName,
 		LaunchdUserFile: filepath.Join(userHomeDir(), "Library", "LaunchAgents", "com.cfsm."+serviceName+".plist"),
 		LaunchdRootFile: filepath.Join("/Library/LaunchDaemons", "com.cfsm."+serviceName+".plist"),
+		UserMode:        false,
+		RunUser:         "root",
+		RunUID:          0,
+		HomeDir:         userHomeDir(),
+	}
+}
+
+func currentUserPaths() Paths {
+	name, home, uid := currentAccount()
+	return userPaths(name, uid, home)
+}
+
+func userPaths(name string, uid int, home string) Paths {
+	serviceName := serviceNameDefault
+	if home == "" {
+		home = userHomeDir()
+	}
+	configDir := filepath.Join(home, ".cf-probe")
+	return Paths{
+		ServiceName:     serviceName,
+		BinaryFile:      filepath.Join(configDir, "bin", serviceName),
+		ConfigDir:       configDir,
+		ConfigFile:      filepath.Join(configDir, "config.conf"),
+		TrafficFile:     filepath.Join(configDir, "traffic.dat"),
+		OldTrafficFile:  "",
+		PIDFile:         filepath.Join(configDir, serviceName+".pid"),
+		LogFile:         filepath.Join(configDir, serviceName+".log"),
+		ServiceFile:     filepath.Join(home, ".config", "systemd", "user", serviceName+".service"),
+		DebugEnvFile:    filepath.Join(configDir, "debug.env"),
+		LaunchdLabel:    "com.cfsm." + serviceName,
+		LaunchdUserFile: filepath.Join(home, "Library", "LaunchAgents", "com.cfsm."+serviceName+".plist"),
+		LaunchdRootFile: filepath.Join("/Library/LaunchDaemons", "com.cfsm."+serviceName+".plist"),
+		UserMode:        true,
+		RunUser:         name,
+		RunUID:          uid,
+		HomeDir:         home,
 	}
 }
 
@@ -64,6 +110,10 @@ func darwinUserPaths(home string) Paths {
 		LaunchdLabel:    "com.cfsm." + serviceName,
 		LaunchdUserFile: filepath.Join(home, "Library", "LaunchAgents", "com.cfsm."+serviceName+".plist"),
 		LaunchdRootFile: filepath.Join("/Library/LaunchDaemons", "com.cfsm."+serviceName+".plist"),
+		UserMode:        true,
+		RunUser:         usernameForUID(sudoUserUID(home)),
+		RunUID:          sudoUserUID(home),
+		HomeDir:         home,
 	}
 }
 
@@ -114,6 +164,13 @@ func sudoUserUID(home string) int {
 }
 
 func deepUninstall(paths Paths) []string {
+	if paths.UserMode {
+		stopService(paths)
+		stopCurrentUserProbeInstances()
+		removeService(paths)
+		removeInstalledFiles(paths)
+		return userUninstallResiduals(paths)
+	}
 	stopUnixAutostart(paths)
 	removeUnixAutostart(paths)
 	removeInstalledFiles(paths)
@@ -121,6 +178,17 @@ func deepUninstall(paths Paths) []string {
 		removeDarwinInstallVariants()
 	}
 	return unixUninstallResiduals(paths)
+}
+
+func userUninstallResiduals(paths Paths) []string {
+	return existingPaths(
+		paths.BinaryFile,
+		paths.ConfigDir,
+		paths.PIDFile,
+		paths.LogFile,
+		paths.DebugEnvFile,
+		paths.ServiceFile,
+	)
 }
 
 func stopUnixAutostart(paths Paths) {
@@ -253,18 +321,322 @@ func launchdLabelLoaded(domain, label string) bool {
 	return runCommandQuiet("launchctl", "print", domain+"/"+label) == nil
 }
 
-func requireInstallPermission() error {
+func requireInstallPermission(paths Paths) error {
+	if paths.UserMode {
+		if runtime.GOOS != "linux" || !systemdUserAvailable() {
+			return errors.New("当前服务器不支持非 root 运行（systemd --user 用户服务不可用），请切换 root 权限后运行")
+		}
+		if !systemdUserLingerEnabled(paths.RunUser) {
+			return fmt.Errorf("当前服务器不支持非 root 运行（当前用户 %s 未开启 linger，无法保证退出登录或重启后继续运行），请切换 root 权限后运行；如需继续使用非 root，请先由 root 执行: loginctl enable-linger %s",
+				paths.RunUser, paths.RunUser)
+		}
+		return nil
+	}
 	if !isRootUser() {
 		return errors.New("请使用 root 权限运行安装: sudo ./cf-probe install ...")
+	}
+	if err := confirmRootInstallWhenUserModeAvailable(); err != nil {
+		return err
 	}
 	return nil
 }
 
-func requireUninstallPermission() error {
+func requireUninstallPermission(paths Paths) error {
+	if paths.UserMode {
+		return nil
+	}
 	if !isRootUser() {
 		return errors.New("请使用 root 权限运行卸载: sudo ./cf-probe uninstall")
 	}
 	return nil
+}
+
+func systemdUserAvailable() bool {
+	return runtime.GOOS == "linux" &&
+		commandExists("systemctl") &&
+		runCommandQuiet("systemctl", "--user", "show-environment") == nil
+}
+
+func systemdUserLingerEnabled(name string) bool {
+	if runtime.GOOS != "linux" || strings.TrimSpace(name) == "" || !commandExists("loginctl") {
+		return false
+	}
+	return strings.EqualFold(commandOutput("loginctl", "show-user", name, "-p", "Linger", "--value"), "yes")
+}
+
+func confirmRootInstallWhenUserModeAvailable() error {
+	if !rootInstallShouldSuggestUserMode() {
+		return nil
+	}
+	ok, err := promptContinueRootInstall()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[WARN] 当前服务器支持非 root 用户模式，但无法读取交互确认；继续使用 root 安装。")
+		return nil
+	}
+	if !ok {
+		return errors.New("已取消 root 安装；请新建或切换到非 root 用户后重新运行安装")
+	}
+	return nil
+}
+
+func rootInstallShouldSuggestUserMode() bool {
+	return runtime.GOOS == "linux" &&
+		commandExists("systemctl") &&
+		commandExists("loginctl") &&
+		(fileExists("/run/systemd/system") || commandOutput("ps", "-p", "1", "-o", "comm=") == "systemd") &&
+		systemdUserAvailable()
+}
+
+func promptContinueRootInstall() (bool, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false, err
+	}
+	defer tty.Close()
+
+	reader := bufio.NewReader(tty)
+	for {
+		_, _ = fmt.Fprintln(tty, "[WARN] 当前服务器支持非 root 用户模式（systemd --user/user manager 可用）。")
+		_, _ = fmt.Fprintln(tty, "[WARN] 为降低安全风险，建议新建非 root 用户并以该用户重新安装。")
+		_, _ = fmt.Fprint(tty, "是否仍继续使用 root 安装？[y/N]: ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes":
+			return true, nil
+		case "", "n", "no":
+			return false, nil
+		default:
+			_, _ = fmt.Fprintln(tty, "请输入 y 或 n。")
+		}
+	}
+}
+
+func checkInstallConflicts(paths Paths) error {
+	if err := checkOtherUserProbeRunning(); err != nil {
+		return err
+	}
+	if paths.UserMode {
+		if conflicts := systemInstallConflicts(); len(conflicts) > 0 {
+			return fmt.Errorf("检测到系统级/root 版 cf-probe 安装: %s；当前版本暂未实现迁移，请先使用 root 清理旧版本后再以当前用户安装",
+				strings.Join(conflicts, ", "))
+		}
+	}
+	return nil
+}
+
+func systemInstallConflicts() []string {
+	paths := systemDefaultPaths()
+	checks := []string{
+		paths.BinaryFile,
+		filepath.Join("/usr/local/bin", paths.ServiceName),
+		filepath.Join("/usr/bin", paths.ServiceName),
+		paths.ConfigFile,
+		paths.TrafficFile,
+		paths.OldTrafficFile,
+		paths.ServiceFile,
+		filepath.Join("/etc/init.d", paths.ServiceName),
+		filepath.Join("/etc/init", paths.ServiceName+".conf"),
+		synologyServiceFile(paths),
+		legacyUnixScriptFile,
+		legacyUnixScriptFile + ".ctl",
+	}
+	if runtime.GOOS == "darwin" {
+		checks = append(checks, paths.LaunchdRootFile, legacyDarwinLaunchdFile)
+	}
+	return existingPaths(checks...)
+}
+
+type runningProbeInstance struct {
+	PID    int
+	UID    int
+	User   string
+	Exe    string
+	Cmd    string
+	Legacy bool
+}
+
+func checkOtherUserProbeRunning() error {
+	for _, inst := range runningProbeInstances() {
+		if inst.UID == currentUID() {
+			continue
+		}
+		if inst.Legacy {
+			return fmt.Errorf("检测到旧 shell 版 cf-probe 已在运行，用户 %s(uid=%d, pid=%d)，命令: %s；请先停止旧版本后再安装",
+				firstNonEmpty(inst.User, strconv.Itoa(inst.UID)), inst.UID, inst.PID, firstNonEmpty(inst.Cmd, inst.Exe))
+		}
+		return fmt.Errorf("检测到 cf-probe 已由用户 %s(uid=%d, pid=%d) 运行，命令: %s；请先停止该实例后再安装",
+			firstNonEmpty(inst.User, strconv.Itoa(inst.UID)), inst.UID, inst.PID, firstNonEmpty(inst.Cmd, inst.Exe))
+	}
+	return nil
+}
+
+func stopCurrentUserProbeInstances() {
+	for _, inst := range runningProbeInstances() {
+		if inst.UID == currentUID() {
+			signalProbeInstance(inst.PID, syscall.SIGTERM)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		if !currentUserProbeRunning() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	for _, inst := range runningProbeInstances() {
+		if inst.UID == currentUID() {
+			signalProbeInstance(inst.PID, syscall.SIGKILL)
+		}
+	}
+}
+
+func currentUserProbeRunning() bool {
+	for _, inst := range runningProbeInstances() {
+		if inst.UID == currentUID() {
+			return true
+		}
+	}
+	return false
+}
+
+func signalProbeInstance(pid int, sig syscall.Signal) {
+	if pid <= 0 || pid == os.Getpid() {
+		return
+	}
+	if proc, err := os.FindProcess(pid); err == nil {
+		_ = proc.Signal(sig)
+	}
+}
+
+func runningProbeInstances() []runningProbeInstance {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var instances []runningProbeInstance
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		inst, ok := probeInstanceFromProc(pid)
+		if ok {
+			instances = append(instances, inst)
+		}
+	}
+	return instances
+}
+
+func probeInstanceFromProc(pid int) (runningProbeInstance, bool) {
+	procDir := filepath.Join("/proc", strconv.Itoa(pid))
+	cmdline := procCmdline(filepath.Join(procDir, "cmdline"))
+	exe, _ := os.Readlink(filepath.Join(procDir, "exe"))
+	if !isProbeRunCommand(exe, cmdline) {
+		return runningProbeInstance{}, false
+	}
+	uid := procUID(procDir)
+	return runningProbeInstance{
+		PID:    pid,
+		UID:    uid,
+		User:   usernameForUID(uid),
+		Exe:    exe,
+		Cmd:    strings.Join(cmdline, " "),
+		Legacy: isLegacyShellCommand(cmdline),
+	}, true
+}
+
+func procCmdline(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	raw := strings.TrimRight(string(data), "\x00")
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, "\x00")
+}
+
+func procUID(procDir string) int {
+	var st syscall.Stat_t
+	if err := syscall.Stat(procDir, &st); err != nil {
+		return -1
+	}
+	return int(st.Uid)
+}
+
+func isProbeRunCommand(exe string, cmdline []string) bool {
+	if isLegacyShellCommand(cmdline) {
+		return true
+	}
+	if len(cmdline) == 0 {
+		return false
+	}
+	base := filepath.Base(exe)
+	if base == "" || base == "." {
+		base = filepath.Base(cmdline[0])
+	}
+	if !strings.HasPrefix(base, serviceNameDefault) && !strings.Contains(cmdline[0], serviceNameDefault) {
+		return false
+	}
+	for _, arg := range cmdline[1:] {
+		if arg == "run" || arg == "start-foreground" {
+			return true
+		}
+	}
+	return false
+}
+
+func isLegacyShellCommand(cmdline []string) bool {
+	return strings.Contains(strings.Join(cmdline, " "), legacyShellScriptName)
+}
+
+func acquireInstanceLock(paths Paths) (func(), error) {
+	lockPath := filepath.Join(os.TempDir(), paths.ServiceName+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o666)
+	if err != nil {
+		return nil, fmt.Errorf("检查运行实例失败 %s: %w", lockPath, err)
+	}
+	_ = os.Chmod(lockPath, 0o666)
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_, _ = f.Seek(0, io.SeekStart)
+		data, _ := io.ReadAll(f)
+		_ = f.Close()
+		if owner := formatInstanceLockOwner(data); owner != "" {
+			return nil, fmt.Errorf("cf-probe 已在运行: %s", owner)
+		}
+		return nil, errors.New("cf-probe 已在运行")
+	}
+	if err := f.Truncate(0); err == nil {
+		_, _ = f.Seek(0, io.SeekStart)
+		exe, _ := os.Executable()
+		_, _ = fmt.Fprintf(f, "pid=%d\nuid=%d\nuser=%s\nexe=%s\nconfig=%s\n",
+			os.Getpid(), currentUID(), firstNonEmpty(paths.RunUser, usernameForUID(currentUID())), exe, paths.ConfigFile)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
+}
+
+func formatInstanceLockOwner(data []byte) string {
+	values := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok {
+			values[k] = v
+		}
+	}
+	if len(values) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("user=%s uid=%s pid=%s exe=%s config=%s",
+		values["user"], values["uid"], values["pid"], values["exe"], values["config"])
 }
 
 func copySelfTo(dst string) error {
@@ -348,6 +720,36 @@ func userHomeDir() string {
 		return "/tmp"
 	}
 	return home
+}
+
+func currentAccount() (string, string, int) {
+	uid := os.Getuid()
+	if account, err := osuser.Current(); err == nil {
+		name := account.Username
+		if idx := strings.LastIndexAny(name, `\`); idx >= 0 {
+			name = name[idx+1:]
+		}
+		home := account.HomeDir
+		if home == "" {
+			home = userHomeDir()
+		}
+		return firstNonEmpty(name, os.Getenv("USER"), strconv.Itoa(uid)), home, uid
+	}
+	return firstNonEmpty(os.Getenv("USER"), strconv.Itoa(uid)), userHomeDir(), uid
+}
+
+func usernameForUID(uid int) string {
+	if uid < 0 {
+		return ""
+	}
+	if account, err := osuser.LookupId(strconv.Itoa(uid)); err == nil && strings.TrimSpace(account.Username) != "" {
+		name := account.Username
+		if idx := strings.LastIndexAny(name, `\`); idx >= 0 {
+			name = name[idx+1:]
+		}
+		return name
+	}
+	return strconv.Itoa(uid)
 }
 
 func runCommand(name string, args ...string) error {

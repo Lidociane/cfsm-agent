@@ -3,6 +3,7 @@ package cfprobe
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +49,40 @@ func TestMergeExplicitInstallConfig(t *testing.T) {
 	mergeExplicitInstallConfig(&merged, off, map[string]bool{"auto_update": true})
 	if merged.AutoUpdate {
 		t.Fatal("AutoUpdate = true, want false when -auto_update=0 is explicit")
+	}
+}
+
+func TestWriteSystemdUserServiceUsesUserSafeSettings(t *testing.T) {
+	tmp := t.TempDir()
+	paths := Paths{
+		ServiceName: "cf-probe",
+		BinaryFile:  filepath.Join(tmp, "bin", "cf-probe"),
+		ConfigDir:   filepath.Join(tmp, ".cf-probe"),
+		ConfigFile:  filepath.Join(tmp, ".cf-probe", "config.conf"),
+		ServiceFile: filepath.Join(tmp, "cf-probe.service"),
+	}
+
+	if err := writeSystemdUserService(paths, false); err != nil {
+		t.Fatalf("writeSystemdUserService returned error: %v", err)
+	}
+	data, err := os.ReadFile(paths.ServiceFile)
+	if err != nil {
+		t.Fatalf("read service file: %v", err)
+	}
+	content := string(data)
+	wantExec := "ExecStart=" + quoteSystemdExecArg(paths.BinaryFile) + " run -config=" + quoteSystemdExecArg(paths.ConfigFile) + " -debug=0"
+	if !strings.Contains(content, wantExec) {
+		t.Fatalf("service content missing ExecStart %q:\n%s", wantExec, content)
+	}
+	for _, disallowed := range []string{
+		"WorkingDirectory=",
+		"CPUSchedulingPolicy=",
+		"IOSchedulingClass=",
+		"IOSchedulingPriority=",
+	} {
+		if strings.Contains(content, disallowed) {
+			t.Fatalf("user service should not contain %s:\n%s", disallowed, content)
+		}
 	}
 }
 

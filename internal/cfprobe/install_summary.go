@@ -38,7 +38,7 @@ func printProbeNode(label, value string) {
 }
 
 func printManagementCommands(paths Paths) {
-	cmds := managementCommands(paths, initSystem())
+	cmds := managementCommands(paths, serviceSystem(paths))
 	if len(cmds) == 0 {
 		return
 	}
@@ -55,6 +55,12 @@ func managementCommands(paths Paths, system string) []managementCommand {
 			{labelRealtimeLog, "journalctl -u " + paths.ServiceName + " -f"},
 			{labelStatus, "systemctl status " + paths.ServiceName},
 			{labelStop, "systemctl stop " + paths.ServiceName},
+		}
+	case "systemd-user":
+		return []managementCommand{
+			{labelRealtimeLog, "journalctl --user -u " + paths.ServiceName + " -f"},
+			{labelStatus, "systemctl --user status " + paths.ServiceName},
+			{labelStop, "systemctl --user stop " + paths.ServiceName},
 		}
 	case "openrc":
 		return []managementCommand{

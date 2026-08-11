@@ -13,6 +13,17 @@ func TestManagementCommandsSystemd(t *testing.T) {
 	assertManagementCommands(t, cmds, want)
 }
 
+func TestManagementCommandsSystemdUser(t *testing.T) {
+	paths := Paths{ServiceName: "cf-probe"}
+	cmds := managementCommands(paths, "systemd-user")
+	want := []managementCommand{
+		{labelRealtimeLog, "journalctl --user -u cf-probe -f"},
+		{labelStatus, "systemctl --user status cf-probe"},
+		{labelStop, "systemctl --user stop cf-probe"},
+	}
+	assertManagementCommands(t, cmds, want)
+}
+
 func TestManagementCommandsOpenRC(t *testing.T) {
 	paths := Paths{ServiceName: "cf-probe", LogFile: "/var/log/cf-probe.log"}
 	cmds := managementCommands(paths, "openrc")

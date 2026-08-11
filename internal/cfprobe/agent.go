@@ -112,6 +112,12 @@ func Run(configFile string, debug bool, version string) error {
 		paths.ConfigDir = filepath.Dir(configFile)
 		paths.TrafficFile = filepath.Join(paths.ConfigDir, "traffic.dat")
 	}
+	releaseLock, err := acquireInstanceLock(paths)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
+
 	cfg, err := readConfig(paths.ConfigFile)
 	if err != nil {
 		return fmt.Errorf("读取配置失败 %s: %w", paths.ConfigFile, err)

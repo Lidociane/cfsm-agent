@@ -37,15 +37,27 @@ func defaultPaths() Paths {
 		ServiceFile:    serviceName,
 		DebugEnvFile:   filepath.Join(configDir, "debug.env"),
 		LaunchdLabel:   "",
+		RunUser:        "SYSTEM",
 	}
 }
 
-func requireInstallPermission() error {
+func requireInstallPermission(_ Paths) error {
 	return nil
 }
 
-func requireUninstallPermission() error {
+func requireUninstallPermission(_ Paths) error {
 	return nil
+}
+
+func checkInstallConflicts(_ Paths) error {
+	return nil
+}
+
+func stopCurrentUserProbeInstances() {
+}
+
+func acquireInstanceLock(_ Paths) (func(), error) {
+	return func() {}, nil
 }
 
 func copySelfTo(dst string) error {

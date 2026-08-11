@@ -33,3 +33,17 @@ func TestParseLegacyShellProcessIDsSkipsOtherNamespaces(t *testing.T) {
 		}
 	}
 }
+
+func TestIsProbeRunCommandDetectsLegacyShell(t *testing.T) {
+	cmdline := []string{"/bin/sh", "/usr/local/bin/" + legacyShellScriptName}
+	if !isProbeRunCommand("/bin/sh", cmdline) {
+		t.Fatal("legacy shell command was not detected as a probe instance")
+	}
+}
+
+func TestIsProbeRunCommandIgnoresInstallerCommand(t *testing.T) {
+	cmdline := []string{"/tmp/cf-probe-linux-amd64", "install"}
+	if isProbeRunCommand("/tmp/cf-probe-linux-amd64", cmdline) {
+		t.Fatal("installer command should not be treated as a running probe instance")
+	}
+}
