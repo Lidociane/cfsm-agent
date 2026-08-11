@@ -76,11 +76,16 @@ func managementCommands(paths Paths, system string) []managementCommand {
 			{labelStop, initScript + " stop"},
 		}
 	case "launchd":
-		launchdTarget := "system/" + paths.LaunchdLabel
+		domain := launchdDomain(paths)
+		launchdTarget := domain + "/" + paths.LaunchdLabel
+		stopCommand := "launchctl bootout " + domain + " " + quoteShell(launchdPlist(paths))
+		if !paths.UserMode {
+			stopCommand = "sudo " + stopCommand
+		}
 		return []managementCommand{
 			{labelRealtimeLog, "tail -f " + quoteShell(paths.LogFile)},
 			{labelStatus, "launchctl print " + launchdTarget},
-			{labelStop, "sudo launchctl bootout system " + quoteShell(launchdPlist(paths))},
+			{labelStop, stopCommand},
 		}
 	case "upstart":
 		upstartLog := filepath.Join("/var/log/upstart", paths.ServiceName+".log")

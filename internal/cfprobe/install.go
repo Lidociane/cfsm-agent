@@ -147,7 +147,24 @@ func removeInstalledFiles(paths Paths) {
 	removeDir(paths.ConfigDir)
 	_ = os.Remove(paths.PIDFile)
 	_ = os.Remove(paths.LogFile)
+	if legacyLog := darwinLegacyUserLogFile(paths); legacyLog != "" {
+		_ = os.Remove(legacyLog)
+	}
 	_ = os.Remove(paths.DebugEnvFile)
+}
+
+func darwinLegacyUserLogFile(paths Paths) string {
+	if runtime.GOOS != "darwin" || !paths.UserMode {
+		return ""
+	}
+	home := paths.HomeDir
+	if home == "" && filepath.Base(paths.ConfigDir) == ".cf-probe" {
+		home = filepath.Dir(paths.ConfigDir)
+	}
+	if home == "" || home == "." || home == "/" {
+		return ""
+	}
+	return filepath.Join(home, "Library", "Logs", firstNonEmpty(paths.ServiceName, serviceNameDefault)+".log")
 }
 
 func removeDir(path string) {
@@ -253,6 +270,9 @@ func initSystem() string {
 
 func serviceSystem(paths Paths) string {
 	if paths.UserMode {
+		if runtime.GOOS == "darwin" {
+			return "launchd"
+		}
 		return "systemd-user"
 	}
 	return initSystem()
@@ -305,8 +325,10 @@ func startService(paths Paths, debug bool) error {
 		return runCommand("/etc/init.d/"+paths.ServiceName, "restart")
 	case "launchd":
 		plist := launchdPlist(paths)
-		_ = runCommandQuiet("launchctl", "bootout", "system", plist)
-		return runCommand("launchctl", "bootstrap", "system", plist)
+		domain := launchdDomain(paths)
+		_ = runCommandQuiet("launchctl", "bootout", domain, plist)
+		_ = runCommandQuiet("launchctl", "bootout", domain+"/"+paths.LaunchdLabel)
+		return runCommand("launchctl", "bootstrap", domain, plist)
 	case "upstart":
 		_ = runCommand("initctl", "reload-configuration")
 		_ = runCommand("initctl", "stop", paths.ServiceName)
@@ -340,7 +362,9 @@ func stopService(paths Paths) {
 		_ = runCommand("/etc/init.d/"+paths.ServiceName, "disable")
 	case "launchd":
 		plist := launchdPlist(paths)
-		_ = runCommandQuiet("launchctl", "bootout", "system", plist)
+		domain := launchdDomain(paths)
+		_ = runCommandQuiet("launchctl", "bootout", domain, plist)
+		_ = runCommandQuiet("launchctl", "bootout", domain+"/"+paths.LaunchdLabel)
 	case "upstart":
 		_ = runCommand("initctl", "stop", paths.ServiceName)
 	case "synology-rc":
@@ -365,8 +389,7 @@ func removeService(paths Paths) {
 	case "openrc", "procd":
 		_ = os.Remove("/etc/init.d/" + paths.ServiceName)
 	case "launchd":
-		_ = os.Remove(paths.LaunchdRootFile)
-		_ = os.Remove(paths.LaunchdUserFile)
+		_ = os.Remove(launchdPlist(paths))
 	case "upstart":
 		_ = os.Remove("/etc/init/" + paths.ServiceName + ".conf")
 	case "synology-rc":
@@ -479,8 +502,12 @@ func writeLaunchdService(paths Paths, debug bool) error {
 		return err
 	}
 	userBlock := ""
-	if runtime.GOOS == "darwin" && isRootUser() {
+	if runtime.GOOS == "darwin" && !paths.UserMode && isRootUser() {
 		userBlock = "    <key>UserName</key>\n    <string>root</string>\n"
+	}
+	configArg := ""
+	if paths.UserMode {
+		configArg = fmt.Sprintf("        <string>-config=%s</string>\n", paths.ConfigFile)
 	}
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -492,6 +519,7 @@ func writeLaunchdService(paths Paths, debug bool) error {
     <array>
         <string>%s</string>
         <string>run</string>
+%s
         <string>-debug=%s</string>
     </array>
     <key>RunAtLoad</key>
@@ -504,7 +532,7 @@ func writeLaunchdService(paths Paths, debug bool) error {
     <string>%s</string>
 </dict>
 </plist>
-`, paths.LaunchdLabel, paths.BinaryFile, boolInt(debug), userBlock, paths.LogFile, paths.LogFile)
+`, paths.LaunchdLabel, paths.BinaryFile, configArg, boolInt(debug), userBlock, paths.LogFile, paths.LogFile)
 	return writeFileExecutable(plist, content, 0o644)
 }
 
@@ -578,7 +606,21 @@ func fileExists(path string) bool {
 }
 
 func launchdPlist(paths Paths) string {
+	if paths.UserMode {
+		return paths.LaunchdUserFile
+	}
 	return paths.LaunchdRootFile
+}
+
+func launchdDomain(paths Paths) string {
+	if paths.UserMode {
+		uid := paths.RunUID
+		if uid <= 0 {
+			uid = currentUID()
+		}
+		return "gui/" + fmt.Sprint(uid)
+	}
+	return "system"
 }
 
 func synologyServiceFile(paths Paths) string {

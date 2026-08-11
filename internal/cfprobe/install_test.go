@@ -86,6 +86,50 @@ func TestWriteSystemdUserServiceUsesUserSafeSettings(t *testing.T) {
 	}
 }
 
+func TestWriteLaunchdUserServiceUsesUserPaths(t *testing.T) {
+	tmp := t.TempDir()
+	paths := Paths{
+		ServiceName:     "cf-probe",
+		BinaryFile:      filepath.Join(tmp, ".cf-probe", "bin", "cf-probe"),
+		ConfigFile:      filepath.Join(tmp, ".cf-probe", "config.conf"),
+		LogFile:         filepath.Join(tmp, ".cf-probe", "cf-probe.log"),
+		LaunchdLabel:    "com.cfsm.cf-probe",
+		LaunchdUserFile: filepath.Join(tmp, "Library", "LaunchAgents", "com.cfsm.cf-probe.plist"),
+		LaunchdRootFile: filepath.Join(tmp, "Library", "LaunchDaemons", "com.cfsm.cf-probe.plist"),
+		UserMode:        true,
+		RunUID:          501,
+	}
+
+	if err := writeLaunchdService(paths, false); err != nil {
+		t.Fatalf("writeLaunchdService returned error: %v", err)
+	}
+	if _, err := os.Stat(paths.LaunchdUserFile); err != nil {
+		t.Fatalf("user launchd plist missing: %v", err)
+	}
+	if _, err := os.Stat(paths.LaunchdRootFile); !os.IsNotExist(err) {
+		t.Fatalf("root launchd plist should not be written: %v", err)
+	}
+	data, err := os.ReadFile(paths.LaunchdUserFile)
+	if err != nil {
+		t.Fatalf("read launchd plist: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"<string>" + paths.BinaryFile + "</string>",
+		"<string>run</string>",
+		"<string>-config=" + paths.ConfigFile + "</string>",
+		"<string>-debug=0</string>",
+		"<string>" + paths.LogFile + "</string>",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("launchd plist missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "UserName") || strings.Contains(content, "root") {
+		t.Fatalf("user launchd plist should not contain root user block:\n%s", content)
+	}
+}
+
 func TestMigrateTrafficMovesLegacyTraffic(t *testing.T) {
 	tmp := t.TempDir()
 	oldDir := filepath.Join(tmp, "old")

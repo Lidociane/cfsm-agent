@@ -196,7 +196,12 @@ if [ -n "${HOME:-}" ]; then
         exit "$status"
     fi
 fi
-for dir in /usr/local/bin /usr/bin /root .; do
+if [ "$os_name" = "darwin" ]; then
+    fallback_dirs="."
+else
+    fallback_dirs="/usr/local/bin /usr/bin /root ."
+fi
+for dir in $fallback_dirs; do
     if stage_and_run_payload "$dir" "$@"; then
         exit 0
     fi

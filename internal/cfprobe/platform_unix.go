@@ -33,8 +33,10 @@ func systemDefaultPaths() Paths {
 	configDir := "/etc/config/cf-probe"
 	pidFile := filepath.Join("/run", serviceName+".pid")
 	logFile := filepath.Join("/var/log", serviceName+".log")
+	launchdUserFile := filepath.Join(userHomeDir(), "Library", "LaunchAgents", "com.cfsm."+serviceName+".plist")
 	if runtime.GOOS == "darwin" {
 		configDir = "/usr/local/etc/cf-probe"
+		launchdUserFile = ""
 	}
 	return Paths{
 		ServiceName:     serviceName,
@@ -48,7 +50,7 @@ func systemDefaultPaths() Paths {
 		ServiceFile:     filepath.Join("/etc/systemd/system", serviceName+".service"),
 		DebugEnvFile:    filepath.Join("/run", serviceName+"-debug.env"),
 		LaunchdLabel:    "com.cfsm." + serviceName,
-		LaunchdUserFile: filepath.Join(userHomeDir(), "Library", "LaunchAgents", "com.cfsm."+serviceName+".plist"),
+		LaunchdUserFile: launchdUserFile,
 		LaunchdRootFile: filepath.Join("/Library/LaunchDaemons", "com.cfsm."+serviceName+".plist"),
 		UserMode:        false,
 		RunUser:         "root",
@@ -90,33 +92,17 @@ func userPaths(name string, uid int, home string) Paths {
 }
 
 func darwinUserPaths(home string) Paths {
-	serviceName := serviceNameDefault
 	if home == "" {
 		home = userHomeDir()
 	}
-	configDir := filepath.Join(home, ".cf-probe")
-	return Paths{
-		ServiceName:     serviceName,
-		BinaryFile:      filepath.Join(home, ".cf-probe", "bin", serviceName),
-		ConfigDir:       configDir,
-		ConfigFile:      filepath.Join(configDir, "config.conf"),
-		TrafficFile:     filepath.Join(configDir, "traffic.dat"),
-		OldTrafficFile:  "/var/lib/cf-probe/traffic.dat",
-		PIDFile:         filepath.Join(configDir, serviceName+".pid"),
-		LogFile:         filepath.Join(home, "Library", "Logs", serviceName+".log"),
-		ServiceFile:     filepath.Join("/etc/systemd/system", serviceName+".service"),
-		DebugEnvFile:    filepath.Join("/run", serviceName+"-debug.env"),
-		LaunchdLabel:    "com.cfsm." + serviceName,
-		LaunchdUserFile: filepath.Join(home, "Library", "LaunchAgents", "com.cfsm."+serviceName+".plist"),
-		LaunchdRootFile: filepath.Join("/Library/LaunchDaemons", "com.cfsm."+serviceName+".plist"),
-		UserMode:        true,
-		RunUser:         usernameForUID(sudoUserUID(home)),
-		RunUID:          sudoUserUID(home),
-		HomeDir:         home,
-	}
+	uid := sudoUserUID(home)
+	return userPaths(usernameForUID(uid), uid, home)
 }
 
 func sudoUserHomeDir() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
 	if user := os.Getenv("SUDO_USER"); user != "" && user != "root" {
 		if home := darwinAccountHome(user); home != "" {
 			return home
@@ -180,7 +166,7 @@ func deepUninstall(paths Paths) []string {
 }
 
 func userUninstallResiduals(paths Paths) []string {
-	return existingPaths(
+	residuals := existingPaths(
 		paths.BinaryFile,
 		paths.ConfigDir,
 		paths.PIDFile,
@@ -188,6 +174,13 @@ func userUninstallResiduals(paths Paths) []string {
 		paths.DebugEnvFile,
 		paths.ServiceFile,
 	)
+	if runtime.GOOS == "darwin" {
+		residuals = append(residuals, existingPaths(paths.LaunchdUserFile, darwinLegacyUserLogFile(paths))...)
+		if launchdLabelLoaded(launchdDomain(paths), paths.LaunchdLabel) {
+			residuals = append(residuals, "launchd:/"+launchdDomain(paths)+"/"+paths.LaunchdLabel)
+		}
+	}
+	return uniqueStrings(residuals)
 }
 
 func stopUnixAutostart(paths Paths) {
@@ -290,6 +283,7 @@ func darwinUninstallResiduals(paths Paths) []string {
 			userPaths.ConfigDir,
 			userPaths.PIDFile,
 			userPaths.LogFile,
+			darwinLegacyUserLogFile(userPaths),
 			userPaths.LaunchdUserFile,
 		)...)
 		if uid := sudoUserUID(home); uid > 0 && launchdLabelLoaded("gui/"+strconv.Itoa(uid), userPaths.LaunchdLabel) {
@@ -321,7 +315,16 @@ func launchdLabelLoaded(domain, label string) bool {
 }
 
 func requireInstallPermission(paths Paths) error {
+	if runtime.GOOS == "darwin" && isRootUser() {
+		return errors.New("macOS 当前版本仅支持普通用户安装，请不要使用 sudo/root；如已安装旧的 root/system 版本，请先执行 sudo /usr/local/bin/cf-probe uninstall 清理后，再以普通用户重新安装")
+	}
 	if paths.UserMode {
+		if runtime.GOOS == "darwin" {
+			if !commandExists("launchctl") {
+				return errors.New("当前 macOS 未检测到 launchctl，无法注册用户 LaunchAgent")
+			}
+			return nil
+		}
 		if runtime.GOOS != "linux" || !systemdUserSupported() {
 			return errors.New("当前系统不支持非 root 运行（未检测到 systemd 用户服务能力），请使用 root 权限运行")
 		}
@@ -390,6 +393,10 @@ func checkInstallConflicts(paths Paths) error {
 	}
 	if paths.UserMode {
 		if conflicts := systemInstallConflicts(); len(conflicts) > 0 {
+			if runtime.GOOS == "darwin" {
+				return fmt.Errorf("检测到 macOS root/system 版 cf-probe 安装: %s；请先执行 sudo /usr/local/bin/cf-probe uninstall 清理旧版，然后不要使用 sudo，以普通用户重新安装",
+					strings.Join(conflicts, ", "))
+			}
 			return fmt.Errorf("检测到系统级/root 版 cf-probe 安装: %s；当前版本暂未实现迁移，请先使用 root 清理旧版本后再以当前用户安装",
 				strings.Join(conflicts, ", "))
 		}
@@ -419,7 +426,16 @@ func systemInstallConflicts() []string {
 	if runtime.GOOS == "darwin" {
 		checks = append(checks, paths.LaunchdRootFile, legacyDarwinLaunchdFile)
 	}
-	return existingPaths(checks...)
+	conflicts := existingPaths(checks...)
+	if runtime.GOOS == "darwin" {
+		if launchdLabelLoaded("system", paths.LaunchdLabel) {
+			conflicts = append(conflicts, "launchd:/system/"+paths.LaunchdLabel)
+		}
+		if launchdLabelLoaded("system", "com.cf.probe") {
+			conflicts = append(conflicts, "launchd:/system/com.cf.probe")
+		}
+	}
+	return uniqueStrings(conflicts)
 }
 
 func userInstallConflicts() []string {

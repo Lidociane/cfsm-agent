@@ -46,6 +46,24 @@ func TestManagementCommandsProcd(t *testing.T) {
 	assertManagementCommands(t, cmds, want)
 }
 
+func TestManagementCommandsLaunchdUser(t *testing.T) {
+	paths := Paths{
+		ServiceName:     "cf-probe",
+		LogFile:         "/Users/alice/.cf-probe/cf-probe.log",
+		LaunchdLabel:    "com.cfsm.cf-probe",
+		LaunchdUserFile: "/Users/alice/Library/LaunchAgents/com.cfsm.cf-probe.plist",
+		UserMode:        true,
+		RunUID:          501,
+	}
+	cmds := managementCommands(paths, "launchd")
+	want := []managementCommand{
+		{labelRealtimeLog, "tail -f " + quoteShell("/Users/alice/.cf-probe/cf-probe.log")},
+		{labelStatus, "launchctl print gui/501/com.cfsm.cf-probe"},
+		{labelStop, "launchctl bootout gui/501 " + quoteShell("/Users/alice/Library/LaunchAgents/com.cfsm.cf-probe.plist")},
+	}
+	assertManagementCommands(t, cmds, want)
+}
+
 func assertManagementCommands(t *testing.T, got, want []managementCommand) {
 	t.Helper()
 	if len(got) != len(want) {
