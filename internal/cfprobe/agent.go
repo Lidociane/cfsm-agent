@@ -33,6 +33,7 @@ type Agent struct {
 	prevTime   time.Time
 	prevDisk   DiskIOCounters
 	prevDiskAt time.Time
+	clock      calibratedClock
 
 	samples    []map[string]any
 	lastReport time.Time
@@ -54,6 +55,11 @@ type timedProbeResult struct {
 type rollingProbeHistory struct {
 	target  string
 	samples []timedProbeResult
+}
+
+type ntpRefreshResult struct {
+	sample ntpSample
+	err    error
 }
 
 func (h *rollingProbeHistory) add(now time.Time, target string, result ProbeResult) {
@@ -313,6 +319,7 @@ func (a *Agent) report(m Metrics) {
 	payload := map[string]any{
 		"id":               a.cfg.ServerID,
 		"secret":           a.cfg.Secret,
+		"time":             a.clock.snapshot(time.Now()),
 		"metrics":          metricsToMap(m),
 		"collect_interval": a.cfg.CollectInterval,
 		"report_interval":  a.cfg.ReportInterval,
@@ -324,6 +331,10 @@ func (a *Agent) report(m Metrics) {
 	if err != nil {
 		a.log.warnf("marshal payload failed: %v", err)
 		return
+	}
+	ntpResult := a.startNTPRefresh()
+	if ntpResult != nil {
+		defer a.finishNTPRefresh(ntpResult)
 	}
 	gpuSummary, _ := json.Marshal(m.GPUInfo)
 	a.log.debugf("metrics summary cpu=%s gpu_info=%s", m.CPU, string(gpuSummary))
@@ -339,6 +350,7 @@ func (a *Agent) report(m Metrics) {
 	req.Header.Set("X-Agent-Version", a.version)
 	req.Header.Set("X-Agent-Config-Md5", firstNonEmpty(a.cfg.ConfigMD5, "none"))
 
+	started := time.Now()
 	resp, err := sharedReportHTTPClient(8*time.Second, usePublicDNSResolver(a.cfg)).Do(req)
 	if err != nil {
 		a.log.warnf("report failed: %v", err)
@@ -346,24 +358,75 @@ func (a *Agent) report(m Metrics) {
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	completed := time.Now()
 	respHeaders := resp.Header
 	reportHTTPCode := resp.StatusCode
-	a.handleReportResponse(reportHTTPCode, respBody, respHeaders)
+	a.handleTimedReportResponse(reportHTTPCode, respBody, respHeaders, started, completed)
 }
 
 func (a *Agent) handleReportResponse(statusCode int, respBody []byte, headers http.Header) {
+	now := time.Now()
+	a.handleTimedReportResponse(statusCode, respBody, headers, now, now)
+}
+
+func (a *Agent) handleTimedReportResponse(statusCode int, respBody []byte, headers http.Header, started, completed time.Time) {
 	a.log.debugf("report response http=%d body=%s", statusCode, strings.TrimSpace(string(respBody)))
 	if statusCode < 200 || statusCode >= 300 {
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(string(respBody)), "OK") {
+	if serverTime, ok := responseServerTime(respBody, headers); ok {
+		snapshot := a.clock.updateServer(serverTime, completed.Sub(started), completed)
+		a.log.debugf("server fallback time calibrated offset_ms=%d round_trip_ms=%d",
+			valueOrZero(snapshot.OffsetMS), valueOrZero(snapshot.RoundTripMS))
+	}
+	rawBody := strings.TrimSpace(string(respBody))
+	if rawBody == "" || rawBody == "{}" || strings.EqualFold(rawBody, "OK") {
 		return
+	}
+	if strings.HasPrefix(rawBody, "{") {
+		var envelope map[string]json.RawMessage
+		if json.Unmarshal(respBody, &envelope) == nil {
+			delete(envelope, "server_time")
+			if len(envelope) == 0 {
+				return
+			}
+		}
 	}
 	if statusCode == http.StatusOK {
 		if err := a.applyRemoteConfig(respBody, headers); err != nil {
 			a.log.warnf("dynamic configuration rejected: %v", err)
 		}
 	}
+}
+
+func (a *Agent) startNTPRefresh() <-chan ntpRefreshResult {
+	if !a.clock.beginNTPRefresh(time.Now()) {
+		return nil
+	}
+	result := make(chan ntpRefreshResult, 1)
+	go func() {
+		sample, err := queryNTPServers(context.Background(), ntpServerHosts)
+		result <- ntpRefreshResult{sample: sample, err: err}
+	}()
+	return result
+}
+
+func (a *Agent) finishNTPRefresh(result <-chan ntpRefreshResult) {
+	refresh := <-result
+	if refresh.err != nil {
+		a.log.debugf("NTP calibration unavailable; Worker server_time remains the fallback: %v", refresh.err)
+		return
+	}
+	snapshot := a.clock.updateNTP(refresh.sample)
+	a.log.debugf("NTP time calibrated source=ntp:%s offset_ms=%d round_trip_ms=%d",
+		refresh.sample.server, valueOrZero(snapshot.OffsetMS), valueOrZero(snapshot.RoundTripMS))
+}
+
+func valueOrZero[T ~int64 | ~uint64](value *T) T {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (a *Agent) networkWorker(ctx context.Context) {
@@ -457,6 +520,7 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		"rx_correction":    true,
 		"tx_correction":    true,
 		"update":           true,
+		"server_time":      true,
 	}
 	for key := range values {
 		if !allowed[key] {
@@ -468,8 +532,18 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		return fmt.Errorf("invalid update %s", update)
 	}
 	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface")
+	hasCorrection := values.Has("rx_correction") || values.Has("tx_correction")
 	if !hasConfig {
-		if values.Has("update") {
+		if hasCorrection {
+			rx := values.Get("rx_correction")
+			tx := values.Get("tx_correction")
+			if err := applyTrafficCorrection(a.paths.TrafficFile, readNetBytes(a.cfg.Interface), a.cfg.Interface, rx, tx); err != nil {
+				return err
+			}
+			_ = a.sendCorrectionConfirm(rx, tx)
+			return nil
+		}
+		if values.Has("update") || values.Has("server_time") {
 			return nil
 		}
 		return errors.New("no config fields")
@@ -524,7 +598,7 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		a.lastReport = time.Time{}
 		a.log.info("dynamic configuration applied md5=%s interface=%s", newMD5, firstNonEmpty(iface, "auto"))
 	}
-	if values.Has("rx_correction") || values.Has("tx_correction") {
+	if hasCorrection {
 		rx := values.Get("rx_correction")
 		tx := values.Get("tx_correction")
 		if err := applyTrafficCorrection(a.paths.TrafficFile, readNetBytes(a.cfg.Interface), a.cfg.Interface, rx, tx); err != nil {
