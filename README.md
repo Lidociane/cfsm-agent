@@ -22,7 +22,13 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 wget -O- https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
 ```
 
-Linux 非 root 执行安装时会使用当前用户，不会新建用户；二进制、配置和流量文件会写入 `~/.cf-probe/`，自启动使用 `systemd --user`。为保证退出登录后仍能后台运行，当前用户需要已开启 linger，例如由管理员执行 `sudo loginctl enable-linger $USER`。如果当前环境不支持 `systemd --user`，请改用 root 安装；如果检测到 root/system 旧版本安装，当前版本会提示先清理旧版本，暂不自动迁移。
+Linux 非 root 执行安装时会使用当前用户，不会新建用户；二进制、配置和流量文件会写入 `~/.cf-probe/`，自启动使用 `systemd --user`。为保证退出登录后仍能后台运行，当前用户需要开启 linger，可先由 root 执行：
+
+```bash
+loginctl enable-linger USERNAME
+```
+
+然后退出 root/su 会话，使用账户密码或 SSH 密钥登录该非 root 用户后再执行安装。不要在 root shell 中直接 `su` 后安装，否则当前会话可能无法连接 `systemd --user` 用户服务（例如 `Failed to connect to bus: No medium found`）。如果当前环境不支持 `systemd --user`，请改用 root 安装；如果检测到 root/system 旧版本安装，当前版本会提示先清理旧版本，暂不自动迁移。
 
 ## Windows 安装
 

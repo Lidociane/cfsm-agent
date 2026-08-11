@@ -3,7 +3,6 @@
 package cfprobe
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -323,20 +322,21 @@ func launchdLabelLoaded(domain, label string) bool {
 
 func requireInstallPermission(paths Paths) error {
 	if paths.UserMode {
-		if runtime.GOOS != "linux" || !systemdUserAvailable() {
-			return errors.New("当前服务器不支持非 root 运行（systemd --user 用户服务不可用），请切换 root 权限后运行")
+		if runtime.GOOS != "linux" || !systemdUserSupported() {
+			return errors.New("当前服务器不支持非 root 运行（未检测到可用的 systemd 用户服务能力），请切换 root 权限后运行")
+		}
+		if !systemdUserAvailable() {
+			return fmt.Errorf("当前会话无法连接 systemd --user 用户服务；请先用 root 执行: loginctl enable-linger %s；然后退出 root/su 会话，使用账户密码或 SSH 密钥登录非 root 用户 %s 后再安装",
+				paths.RunUser, paths.RunUser)
 		}
 		if !systemdUserLingerEnabled(paths.RunUser) {
-			return fmt.Errorf("当前服务器不支持非 root 运行（当前用户 %s 未开启 linger，无法保证退出登录或重启后继续运行），请切换 root 权限后运行；如需继续使用非 root，请先由 root 执行: loginctl enable-linger %s",
-				paths.RunUser, paths.RunUser)
+			return fmt.Errorf("当前用户 %s 未开启 linger，无法保证退出登录或重启后继续运行；请先用 root 执行: loginctl enable-linger %s；然后退出 root/su 会话，使用账户密码或 SSH 密钥登录非 root 用户 %s 后再安装",
+				paths.RunUser, paths.RunUser, paths.RunUser)
 		}
 		return nil
 	}
 	if !isRootUser() {
 		return errors.New("请使用 root 权限运行安装: sudo ./cf-probe install ...")
-	}
-	if err := confirmRootInstallWhenUserModeAvailable(); err != nil {
-		return err
 	}
 	return nil
 }
@@ -348,13 +348,24 @@ func requireUninstallPermission(paths Paths) error {
 	if !isRootUser() {
 		return errors.New("请使用 root 权限运行卸载: sudo ./cf-probe uninstall")
 	}
+	if conflicts := userInstallConflicts(); len(conflicts) > 0 {
+		return fmt.Errorf("检测到已有非 root 用户版 cf-probe 安装: %s；root 卸载只清理系统级安装，请先切换到对应用户执行卸载",
+			strings.Join(conflicts, ", "))
+	}
 	return nil
 }
 
 func systemdUserAvailable() bool {
-	return runtime.GOOS == "linux" &&
+	return systemdUserSupported() &&
 		commandExists("systemctl") &&
 		runCommandQuiet("systemctl", "--user", "show-environment") == nil
+}
+
+func systemdUserSupported() bool {
+	return runtime.GOOS == "linux" &&
+		commandExists("systemctl") &&
+		commandExists("loginctl") &&
+		(fileExists("/run/systemd/system") || commandOutput("ps", "-p", "1", "-o", "comm=") == "systemd")
 }
 
 func systemdUserLingerEnabled(name string) bool {
@@ -362,56 +373,6 @@ func systemdUserLingerEnabled(name string) bool {
 		return false
 	}
 	return strings.EqualFold(commandOutput("loginctl", "show-user", name, "-p", "Linger", "--value"), "yes")
-}
-
-func confirmRootInstallWhenUserModeAvailable() error {
-	if !rootInstallShouldSuggestUserMode() {
-		return nil
-	}
-	ok, err := promptContinueRootInstall()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "[WARN] 当前服务器支持非 root 用户模式，但无法读取交互确认；继续使用 root 安装。")
-		return nil
-	}
-	if !ok {
-		return errors.New("已取消 root 安装；请新建或切换到非 root 用户后重新运行安装")
-	}
-	return nil
-}
-
-func rootInstallShouldSuggestUserMode() bool {
-	return runtime.GOOS == "linux" &&
-		commandExists("systemctl") &&
-		commandExists("loginctl") &&
-		(fileExists("/run/systemd/system") || commandOutput("ps", "-p", "1", "-o", "comm=") == "systemd") &&
-		systemdUserAvailable()
-}
-
-func promptContinueRootInstall() (bool, error) {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return false, err
-	}
-	defer tty.Close()
-
-	reader := bufio.NewReader(tty)
-	for {
-		_, _ = fmt.Fprintln(tty, "[WARN] 当前服务器支持非 root 用户模式（systemd --user/user manager 可用）。")
-		_, _ = fmt.Fprintln(tty, "[WARN] 为降低安全风险，建议新建非 root 用户并以该用户重新安装。")
-		_, _ = fmt.Fprint(tty, "是否仍继续使用 root 安装？[y/N]: ")
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return false, err
-		}
-		switch strings.ToLower(strings.TrimSpace(line)) {
-		case "y", "yes":
-			return true, nil
-		case "", "n", "no":
-			return false, nil
-		default:
-			_, _ = fmt.Fprintln(tty, "请输入 y 或 n。")
-		}
-	}
 }
 
 func checkInstallConflicts(paths Paths) error {
@@ -423,6 +384,9 @@ func checkInstallConflicts(paths Paths) error {
 			return fmt.Errorf("检测到系统级/root 版 cf-probe 安装: %s；当前版本暂未实现迁移，请先使用 root 清理旧版本后再以当前用户安装",
 				strings.Join(conflicts, ", "))
 		}
+	} else if conflicts := userInstallConflicts(); len(conflicts) > 0 {
+		return fmt.Errorf("检测到已有非 root 用户版 cf-probe 安装: %s；为避免重复上报，请先切换到对应用户卸载后再继续 root 安装",
+			strings.Join(conflicts, ", "))
 	}
 	return nil
 }
@@ -447,6 +411,58 @@ func systemInstallConflicts() []string {
 		checks = append(checks, paths.LaunchdRootFile, legacyDarwinLaunchdFile)
 	}
 	return existingPaths(checks...)
+}
+
+func userInstallConflicts() []string {
+	if runtime.GOOS != "linux" || !isRootUser() {
+		return nil
+	}
+	var conflicts []string
+	for _, home := range linuxUserHomeDirs() {
+		service := filepath.Join(home, ".config", "systemd", "user", serviceNameDefault+".service")
+		binary := filepath.Join(home, ".cf-probe", "bin", serviceNameDefault)
+		config := filepath.Join(home, ".cf-probe", "config.conf")
+		if hits := existingPaths(service, binary, config); len(hits) > 0 {
+			conflicts = append(conflicts, home+":"+strings.Join(hits, "|"))
+		}
+	}
+	return uniqueStrings(conflicts)
+}
+
+func linuxUserHomeDirs() []string {
+	return uniqueStrings(passwdUserHomeDirs())
+}
+
+func passwdUserHomeDirs() []string {
+	data, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return nil
+	}
+	return parsePasswdUserHomeDirs(string(data))
+}
+
+func parsePasswdUserHomeDirs(raw string) []string {
+	var homes []string
+	for _, line := range strings.Split(raw, "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[2])
+		if err != nil || uid == 0 || uid < 100 {
+			continue
+		}
+		home := strings.TrimSpace(fields[5])
+		shell := strings.TrimSpace(fields[6])
+		if home == "" || home == "/" || strings.HasPrefix(shell, "/usr/sbin/nologin") || strings.HasPrefix(shell, "/sbin/nologin") || strings.HasPrefix(shell, "/bin/false") {
+			continue
+		}
+		homes = append(homes, home)
+	}
+	return homes
 }
 
 type runningProbeInstance struct {
