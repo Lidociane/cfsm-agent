@@ -29,7 +29,13 @@ Linux 非 root 执行安装时会使用当前用户，不会新建用户；二�
 curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- uninstall
 ```
 
-如果已有非 root 用户，先在 root 下为该用户开启 linger，以支持退出登录后后台运行和自启动：
+如果已有非 root 用户，先直接登录该用户并开启 linger，以支持退出登录后后台运行和自启动：
+
+```bash
+loginctl enable-linger
+```
+
+如果当前用户执行无权限，再切回 root 为该用户开启：
 
 ```bash
 loginctl enable-linger 用户名

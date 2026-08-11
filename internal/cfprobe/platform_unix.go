@@ -323,20 +323,29 @@ func launchdLabelLoaded(domain, label string) bool {
 func requireInstallPermission(paths Paths) error {
 	if paths.UserMode {
 		if runtime.GOOS != "linux" || !systemdUserSupported() {
-			return errors.New("当前服务器不支持非 root 运行（未检测到可用的 systemd 用户服务能力），请切换 root 权限后运行")
+			return errors.New("当前系统不支持非 root 运行（未检测到 systemd 用户服务能力），请使用 root 权限运行")
 		}
 		if !systemdUserAvailable() {
-			return fmt.Errorf("当前会话无法连接 systemd --user 用户服务；请先用 root 执行: loginctl enable-linger %s；然后退出 root/su 会话，使用账户密码或 SSH 密钥登录非 root 用户 %s 后再安装",
+			return fmt.Errorf("无法连接到 systemd --user 服务\n"+
+				"可能原因：\n"+
+				"1. 当前是 root/su/sudo 切换出来的会话，请退出后直接以非 root 用户 %s 登录\n"+
+				"2. 当前会话缺少 XDG_RUNTIME_DIR 或用户 bus\n"+
+				"3. 该用户的 systemd user manager 尚未可用\n"+
+				"建议：先执行 loginctl enable-linger；如无权限，请用 root 执行 loginctl enable-linger %s，然后重新登录该用户再安装",
 				paths.RunUser, paths.RunUser)
 		}
 		if !systemdUserLingerEnabled(paths.RunUser) {
-			return fmt.Errorf("当前用户 %s 未开启 linger，无法保证退出登录或重启后继续运行；请先用 root 执行: loginctl enable-linger %s；然后退出 root/su 会话，使用账户密码或 SSH 密钥登录非 root 用户 %s 后再安装",
-				paths.RunUser, paths.RunUser, paths.RunUser)
+			return fmt.Errorf("当前用户 %s 未开启 linger，退出登录后服务将停止\n"+
+				"请执行以下命令后重新安装:\n"+
+				"  loginctl enable-linger\n"+
+				"如无权限，请用 root 执行:\n"+
+				"  loginctl enable-linger %s",
+				paths.RunUser, paths.RunUser)
 		}
 		return nil
 	}
 	if !isRootUser() {
-		return errors.New("请使用 root 权限运行安装: sudo ./cf-probe install ...")
+		return errors.New("请使用 root 权限运行: sudo ./cf-probe install ...")
 	}
 	return nil
 }
