@@ -361,10 +361,7 @@ func stopService(paths Paths) {
 		_ = runCommand("/etc/init.d/"+paths.ServiceName, "stop")
 		_ = runCommand("/etc/init.d/"+paths.ServiceName, "disable")
 	case "launchd":
-		plist := launchdPlist(paths)
-		domain := launchdDomain(paths)
-		_ = runCommandQuiet("launchctl", "bootout", domain, plist)
-		_ = runCommandQuiet("launchctl", "bootout", domain+"/"+paths.LaunchdLabel)
+		stopLaunchdService(paths)
 	case "upstart":
 		_ = runCommand("initctl", "stop", paths.ServiceName)
 	case "synology-rc":
@@ -397,6 +394,17 @@ func removeService(paths Paths) {
 	case "windows":
 		_ = runCommand("schtasks", "/Delete", "/TN", paths.ServiceName, "/F")
 	}
+}
+
+func stopLaunchdService(paths Paths) {
+	plist := launchdPlist(paths)
+	domain := launchdDomain(paths)
+	_ = runCommandQuiet("launchctl", "bootout", domain, plist)
+	_ = runCommandQuiet("launchctl", "bootout", domain+"/"+paths.LaunchdLabel)
+	if paths.UserMode {
+		_ = runCommandQuiet("launchctl", "remove", paths.LaunchdLabel)
+	}
+	stopDetached(paths.PIDFile)
 }
 
 func writeSystemdService(paths Paths, debug bool) error {
