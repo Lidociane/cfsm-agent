@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultPingTimeout      = 3 * time.Second
+	defaultPingTimeout      = 1500 * time.Millisecond
 	highLatencyThresholdMS  = 1000
 	pingHighLatencyRetries  = 3
 	retryDropThresholdTCPMS = 800
