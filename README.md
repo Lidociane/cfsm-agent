@@ -305,7 +305,7 @@ Agent 会按 `REPORT_INTERVAL` 向 `WORKER_URL` 发起 `POST` 请求，`Content-
 | `round_trip_ms` | number/null | 最近一次成功校准请求的往返耗时 |
 | `sample_age_ms` | number/null | 最近校准样本到本次组包的单调时钟年龄 |
 
-Agent 每 10 分钟并行查询 `time.cloudflare.com`、`time.google.com`、`time.nist.gov` 和 `ntp.aliyun.com`，按成功样本的偏差中位数选择来源，校准样本最长使用 24 小时。准确时间锚定在单调时钟上推进，因此校准后即使本机墙钟跳变，下一次上报的 `offset_ms` 也会立即反映；Agent 不修改系统时间，也不改写已采集的 `samples[].ts`。
+Agent 每 10 分钟并行查询 `time.cloudflare.com`、`time.google.com`、`time.nist.gov` 和 `ntp.aliyun.com`，按成功样本的偏差中位数选择来源，校准样本最长使用 24 小时。准确时间锚定在单调时钟上推进，因此校准后即使本机墙钟跳变，下一次上报的 `offset_ms` 也会立即反映。上报前会用同一锚点换算 `samples[].ts`，并校正 `metrics.boot_time`；本轮 NTP 完成前采集的待上报样本也会按单调时间回算。Agent 不修改系统时间。
 
 公共 NTP 不可用时，Worker 可以在成功响应中返回尽量靠近响应发送时刻生成的 Unix 毫秒 `server_time`。现有 URL 编码响应可直接追加 `server_time=1754300060011`；无配置响应也可返回 `{"server_time":1754300060011}`，或设置 `X-Server-Time: 1754300060011`。Agent 会结合本次请求 RTT 推算兜底时间，旧 Worker 无需修改也仍然兼容。
 

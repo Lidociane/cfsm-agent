@@ -35,7 +35,7 @@ type Agent struct {
 	prevDiskAt time.Time
 	clock      calibratedClock
 
-	samples    []map[string]any
+	samples    []metricSample
 	lastReport time.Time
 	updateMu   sync.Mutex
 }
@@ -60,6 +60,11 @@ type rollingProbeHistory struct {
 type ntpRefreshResult struct {
 	sample ntpSample
 	err    error
+}
+
+type metricSample struct {
+	at      time.Time
+	metrics map[string]any
 }
 
 func (h *rollingProbeHistory) add(now time.Time, target string, result ProbeResult) {
@@ -225,9 +230,9 @@ func (a *Agent) tick() {
 	}
 	m := a.buildMetrics(cpu, netNow, rxSpeed, txSpeed, rxMonthly, txMonthly, diskIO)
 	if a.cfg.CollectInterval > 0 {
-		a.samples = append(a.samples, map[string]any{
-			"ts":      now.UnixMilli(),
-			"metrics": sampleMetricsToMap(m),
+		a.samples = append(a.samples, metricSample{
+			at:      now,
+			metrics: sampleMetricsToMap(m),
 		})
 	}
 	if shouldReport {
@@ -316,25 +321,25 @@ func probeLossValue(node string, r ProbeResult) any {
 }
 
 func (a *Agent) report(m Metrics) {
+	if ntpResult := a.startNTPRefresh(); ntpResult != nil {
+		a.finishNTPRefresh(ntpResult)
+	}
+	reportAt := time.Now()
 	payload := map[string]any{
 		"id":               a.cfg.ServerID,
 		"secret":           a.cfg.Secret,
-		"time":             a.clock.snapshot(time.Now()),
-		"metrics":          metricsToMap(m),
+		"time":             a.clock.snapshot(reportAt),
+		"metrics":          a.metricsForReport(m, reportAt),
 		"collect_interval": a.cfg.CollectInterval,
 		"report_interval":  a.cfg.ReportInterval,
 	}
 	if a.cfg.CollectInterval > 0 {
-		payload["samples"] = a.samples
+		payload["samples"] = a.samplesForReport()
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		a.log.warnf("marshal payload failed: %v", err)
 		return
-	}
-	ntpResult := a.startNTPRefresh()
-	if ntpResult != nil {
-		defer a.finishNTPRefresh(ntpResult)
 	}
 	gpuSummary, _ := json.Marshal(m.GPUInfo)
 	a.log.debugf("metrics summary cpu=%s gpu_info=%s", m.CPU, string(gpuSummary))
@@ -362,6 +367,27 @@ func (a *Agent) report(m Metrics) {
 	respHeaders := resp.Header
 	reportHTTPCode := resp.StatusCode
 	a.handleTimedReportResponse(reportHTTPCode, respBody, respHeaders, started, completed)
+}
+
+func (a *Agent) samplesForReport() []map[string]any {
+	samples := make([]map[string]any, 0, len(a.samples))
+	for _, sample := range a.samples {
+		timestamp, _ := a.clock.timestamp(sample.at)
+		samples = append(samples, map[string]any{
+			"ts":      timestamp,
+			"metrics": sample.metrics,
+		})
+	}
+	return samples
+}
+
+func (a *Agent) metricsForReport(m Metrics, reportAt time.Time) map[string]any {
+	metrics := metricsToMap(m)
+	bootTime, err := strconv.ParseInt(m.BootTime, 10, 64)
+	if err == nil && bootTime > 0 {
+		metrics["boot_time"] = strconv.FormatInt(a.clock.correctLocalTimestamp(bootTime, reportAt), 10)
+	}
+	return metrics
 }
 
 func (a *Agent) handleReportResponse(statusCode int, respBody []byte, headers http.Header) {

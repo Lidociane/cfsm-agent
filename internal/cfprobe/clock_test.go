@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -126,6 +127,60 @@ func TestCalibratedClockPrefersFreshNTPAndFallsBackToServer(t *testing.T) {
 	snapshot = clock.snapshot(now.Add(time.Second))
 	if snapshot.Source == nil || *snapshot.Source != "server" {
 		t.Fatalf("fallback Source = %v, want server", snapshot.Source)
+	}
+}
+
+func TestCalibratedClockCorrectsSamplesCollectedBeforeCalibration(t *testing.T) {
+	anchor := time.Now()
+	clock := calibratedClock{
+		ntp: &clockCalibration{
+			source:           "ntp:test",
+			anchor:           anchor,
+			accurateAtAnchor: 1_000_000,
+		},
+	}
+
+	timestamp, ok := clock.timestamp(anchor.Add(-3 * time.Second))
+	if !ok {
+		t.Fatal("retroactive timestamp was not calibrated")
+	}
+	if timestamp != 997_000 {
+		t.Fatalf("timestamp = %d, want 997000", timestamp)
+	}
+
+	if timestamp, ok := clock.timestamp(anchor.Add(-maxCalibrationAge - time.Millisecond)); ok {
+		t.Fatalf("expired retroactive timestamp was calibrated as %d", timestamp)
+	}
+}
+
+func TestSamplesAndBootTimeUseCalibratedTimeline(t *testing.T) {
+	anchor := time.Now()
+	offset := int64(500)
+	agent := Agent{
+		clock: calibratedClock{
+			ntp: &clockCalibration{
+				source:           "ntp:test",
+				anchor:           anchor,
+				accurateAtAnchor: anchor.UnixMilli() + offset,
+			},
+		},
+		samples: []metricSample{{
+			at:      anchor.Add(-3 * time.Second),
+			metrics: map[string]any{"cpu": "1.00"},
+		}},
+	}
+
+	samples := agent.samplesForReport()
+	wantSampleTime := anchor.UnixMilli() + offset - 3_000
+	if got := samples[0]["ts"]; got != wantSampleTime {
+		t.Fatalf("samples[0].ts = %v, want %d", got, wantSampleTime)
+	}
+
+	localBootTime := anchor.UnixMilli() - int64(time.Hour/time.Millisecond)
+	metrics := agent.metricsForReport(Metrics{BootTime: strconv.FormatInt(localBootTime, 10)}, anchor)
+	wantBootTime := strconv.FormatInt(localBootTime+offset, 10)
+	if got := metrics["boot_time"]; got != wantBootTime {
+		t.Fatalf("metrics.boot_time = %v, want %s", got, wantBootTime)
 	}
 }
 
