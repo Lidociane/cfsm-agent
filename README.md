@@ -208,7 +208,7 @@ Agent 会按 `REPORT_INTERVAL` 向 `WORKER_URL` 发起 `POST` 请求，`Content-
     "local_ts": 1754300060123,
     "accurate_ts": 1754300060000,
     "offset_ms": -123,
-    "source": "ntp:time.cloudflare.com",
+    "source": "date",
     "round_trip_ms": 18,
     "sample_age_ms": 29982
   },
@@ -299,15 +299,13 @@ Agent 会按 `REPORT_INTERVAL` 向 `WORKER_URL` 发起 `POST` 请求，`Content-
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `local_ts` | number | 本次组包时的本机 Unix 毫秒墙钟 |
-| `accurate_ts` | number/null | 根据最近一次 NTP 或 Worker 时间样本，以单调时钟推算的 Unix 毫秒时间；首次校准前为 `null` |
+| `accurate_ts` | number/null | 根据最近一次 Worker 响应头 `Date` 时间样本，以单调时钟推算的 Unix 毫秒时间；首次校准前为 `null` |
 | `offset_ms` | number/null | `accurate_ts - local_ts`；正数表示本机慢，负数表示本机快 |
-| `source` | string/null | 优先为 `ntp:<host>`；公共 NTP 不可用而 Worker 提供时间时为 `server` |
+| `source` | string/null | 成功校准后为 `date` |
 | `round_trip_ms` | number/null | 最近一次成功校准请求的往返耗时 |
 | `sample_age_ms` | number/null | 最近校准样本到本次组包的单调时钟年龄 |
 
-Agent 每 10 分钟并行查询 `time.cloudflare.com`、`time.google.com`、`time.nist.gov` 和 `ntp.aliyun.com`，按成功样本的偏差中位数选择来源，校准样本最长使用 24 小时。准确时间锚定在单调时钟上推进，因此校准后即使本机墙钟跳变，下一次上报的 `offset_ms` 也会立即反映。上报前会用同一锚点换算 `samples[].ts`，并校正 `metrics.boot_time`；本轮 NTP 完成前采集的待上报样本也会按单调时间回算。Agent 不修改系统时间。
-
-公共 NTP 不可用时，Worker 可以在成功响应中返回尽量靠近响应发送时刻生成的 Unix 毫秒 `server_time`。现有 URL 编码响应可直接追加 `server_time=1754300060011`；无配置响应也可返回 `{"server_time":1754300060011}`，或设置 `X-Server-Time: 1754300060011`。Agent 会结合本次请求 RTT 推算兜底时间，旧 Worker 无需修改也仍然兼容。
+Agent 只使用 Worker 成功响应里的 HTTP `Date` 头做时间校准。响应头示例：`Date: Thu, 13 Aug 2026 00:23:22 GMT`。Agent 会按该格式解析为 Unix 毫秒时间戳，并结合本次请求 RTT 锚定到单调时钟。若新 `Date` 样本与当前已校准时间的差值在 30 秒内，则跳过更新；首次校准、校准过期或差值超过 30 秒时才覆盖。校准样本最长使用 24 小时。上报前会用同一锚点换算 `samples[].ts`，并校正 `metrics.boot_time`。Agent 不修改系统时间。
 
 `metrics` 字段：
 

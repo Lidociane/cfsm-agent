@@ -57,11 +57,6 @@ type rollingProbeHistory struct {
 	samples []timedProbeResult
 }
 
-type ntpRefreshResult struct {
-	sample ntpSample
-	err    error
-}
-
 type metricSample struct {
 	at      time.Time
 	metrics map[string]any
@@ -321,9 +316,6 @@ func probeLossValue(node string, r ProbeResult) any {
 }
 
 func (a *Agent) report(m Metrics) {
-	if ntpResult := a.startNTPRefresh(); ntpResult != nil {
-		a.finishNTPRefresh(ntpResult)
-	}
 	reportAt := time.Now()
 	payload := map[string]any{
 		"id":               a.cfg.ServerID,
@@ -361,12 +353,12 @@ func (a *Agent) report(m Metrics) {
 		a.log.warnf("report failed: %v", err)
 		return
 	}
+	headerReceived := time.Now()
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-	completed := time.Now()
 	respHeaders := resp.Header
 	reportHTTPCode := resp.StatusCode
-	a.handleTimedReportResponse(reportHTTPCode, respBody, respHeaders, started, completed)
+	a.handleTimedReportResponse(reportHTTPCode, respBody, respHeaders, started, headerReceived)
 }
 
 func (a *Agent) samplesForReport() []map[string]any {
@@ -395,15 +387,20 @@ func (a *Agent) handleReportResponse(statusCode int, respBody []byte, headers ht
 	a.handleTimedReportResponse(statusCode, respBody, headers, now, now)
 }
 
-func (a *Agent) handleTimedReportResponse(statusCode int, respBody []byte, headers http.Header, started, completed time.Time) {
+func (a *Agent) handleTimedReportResponse(statusCode int, respBody []byte, headers http.Header, started, received time.Time) {
 	a.log.debugf("report response http=%d body=%s", statusCode, strings.TrimSpace(string(respBody)))
 	if statusCode < 200 || statusCode >= 300 {
 		return
 	}
-	if serverTime, ok := responseServerTime(respBody, headers); ok {
-		snapshot := a.clock.updateServer(serverTime, completed.Sub(started), completed)
-		a.log.debugf("server fallback time calibrated offset_ms=%d round_trip_ms=%d",
-			valueOrZero(snapshot.OffsetMS), valueOrZero(snapshot.RoundTripMS))
+	if dateTime, ok := responseDateTime(headers); ok {
+		snapshot, updated := a.clock.updateDate(dateTime, received.Sub(started), received)
+		if updated {
+			a.log.debugf("Date header time calibrated offset_ms=%d round_trip_ms=%d",
+				valueOrZero(snapshot.OffsetMS), valueOrZero(snapshot.RoundTripMS))
+		} else {
+			a.log.debugf("Date header time calibration skipped offset_ms=%d threshold_ms=%d",
+				valueOrZero(snapshot.OffsetMS), int64(dateCalibrationThreshold/time.Millisecond))
+		}
 	}
 	rawBody := strings.TrimSpace(string(respBody))
 	if rawBody == "" || rawBody == "{}" || strings.EqualFold(rawBody, "OK") {
@@ -411,11 +408,8 @@ func (a *Agent) handleTimedReportResponse(statusCode int, respBody []byte, heade
 	}
 	if strings.HasPrefix(rawBody, "{") {
 		var envelope map[string]json.RawMessage
-		if json.Unmarshal(respBody, &envelope) == nil {
-			delete(envelope, "server_time")
-			if len(envelope) == 0 {
-				return
-			}
+		if json.Unmarshal(respBody, &envelope) == nil && len(envelope) == 0 {
+			return
 		}
 	}
 	if statusCode == http.StatusOK {
@@ -423,29 +417,6 @@ func (a *Agent) handleTimedReportResponse(statusCode int, respBody []byte, heade
 			a.log.warnf("dynamic configuration rejected: %v", err)
 		}
 	}
-}
-
-func (a *Agent) startNTPRefresh() <-chan ntpRefreshResult {
-	if !a.clock.beginNTPRefresh(time.Now()) {
-		return nil
-	}
-	result := make(chan ntpRefreshResult, 1)
-	go func() {
-		sample, err := queryNTPServers(context.Background(), ntpServerHosts)
-		result <- ntpRefreshResult{sample: sample, err: err}
-	}()
-	return result
-}
-
-func (a *Agent) finishNTPRefresh(result <-chan ntpRefreshResult) {
-	refresh := <-result
-	if refresh.err != nil {
-		a.log.debugf("NTP calibration unavailable; Worker server_time remains the fallback: %v", refresh.err)
-		return
-	}
-	snapshot := a.clock.updateNTP(refresh.sample)
-	a.log.debugf("NTP time calibrated source=ntp:%s offset_ms=%d round_trip_ms=%d",
-		refresh.sample.server, valueOrZero(snapshot.OffsetMS), valueOrZero(snapshot.RoundTripMS))
 }
 
 func valueOrZero[T ~int64 | ~uint64](value *T) T {
@@ -546,7 +517,6 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		"rx_correction":    true,
 		"tx_correction":    true,
 		"update":           true,
-		"server_time":      true,
 	}
 	for key := range values {
 		if !allowed[key] {
@@ -569,7 +539,7 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 			_ = a.sendCorrectionConfirm(rx, tx)
 			return nil
 		}
-		if values.Has("update") || values.Has("server_time") {
+		if values.Has("update") {
 			return nil
 		}
 		return errors.New("no config fields")

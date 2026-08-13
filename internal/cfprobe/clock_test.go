@@ -1,29 +1,28 @@
 package cfprobe
 
 import (
-	"context"
 	"encoding/json"
-	"net"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
 )
 
-func TestServerCalibrationUsesRTTMidpointAndMonotonicAge(t *testing.T) {
+func TestDateCalibrationUsesRTTMidpointAndMonotonicAge(t *testing.T) {
 	anchor := time.Now()
-	serverTime := anchor.UnixMilli() + 500
-	calibration := newServerCalibration(serverTime, 80*time.Millisecond, anchor)
+	dateTime := anchor.UnixMilli() + 500
+	calibration := newDateCalibration(dateTime, 80*time.Millisecond, anchor)
 	snapshot := calibration.snapshot(anchor.Add(20 * time.Millisecond))
 
-	if snapshot.AccurateTS == nil || *snapshot.AccurateTS != serverTime+60 {
-		t.Fatalf("AccurateTS = %v, want %d", snapshot.AccurateTS, serverTime+60)
+	if snapshot.AccurateTS == nil || *snapshot.AccurateTS != dateTime+60 {
+		t.Fatalf("AccurateTS = %v, want %d", snapshot.AccurateTS, dateTime+60)
 	}
 	if snapshot.OffsetMS == nil || *snapshot.OffsetMS != 540 {
 		t.Fatalf("OffsetMS = %v, want 540", snapshot.OffsetMS)
 	}
-	if snapshot.Source == nil || *snapshot.Source != "server" {
-		t.Fatalf("Source = %v, want server", snapshot.Source)
+	if snapshot.Source == nil || *snapshot.Source != "date" {
+		t.Fatalf("Source = %v, want date", snapshot.Source)
 	}
 	if snapshot.RoundTripMS == nil || *snapshot.RoundTripMS != 80 {
 		t.Fatalf("RoundTripMS = %v, want 80", snapshot.RoundTripMS)
@@ -33,108 +32,90 @@ func TestServerCalibrationUsesRTTMidpointAndMonotonicAge(t *testing.T) {
 	}
 }
 
-func TestNTPTimestampRoundTripPreservesUnixMilliseconds(t *testing.T) {
-	const unixMilliseconds = int64(1_754_300_060_123)
-	encoded := unixMillisecondsToNTPTimestamp(unixMilliseconds)
-	decoded, err := ntpTimestampToUnixNanoseconds(encoded[:])
-	if err != nil {
-		t.Fatalf("ntpTimestampToUnixNanoseconds() error = %v", err)
-	}
-	difference := decoded/nanosecondsPerMilli - unixMilliseconds
-	if difference < -1 || difference > 1 {
-		t.Fatalf("decoded difference = %dms, want within 1ms", difference)
+func TestResponseDateTimeParsesHTTPDateHeader(t *testing.T) {
+	headers := http.Header{responseDateHeader: []string{"Thu, 13 Aug 2026 00:23:22 GMT"}}
+	got, ok := responseDateTime(headers)
+	want := time.Date(2026, time.August, 13, 0, 23, 22, 0, time.UTC).UnixMilli()
+	if !ok || got != want {
+		t.Fatalf("responseDateTime() = (%d, %v), want (%d, true)", got, ok, want)
 	}
 }
 
-func TestNTPClientUsesServerTimestamps(t *testing.T) {
-	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	if err != nil {
-		t.Fatalf("ListenUDP() error = %v", err)
+func TestResponseDateTimeRejectsMissingOrInvalidDateHeader(t *testing.T) {
+	if timestamp, ok := responseDateTime(nil); ok {
+		t.Fatalf("missing Date header parsed as %d", timestamp)
 	}
-	defer server.Close()
-
-	serverErr := make(chan error, 1)
-	go func() {
-		request := make([]byte, 48)
-		_, peer, err := server.ReadFromUDP(request)
-		if err != nil {
-			serverErr <- err
-			return
-		}
-		accurate := time.Now().UnixMilli() + 250
-		stamp := unixMillisecondsToNTPTimestamp(accurate)
-		response := make([]byte, 48)
-		response[0] = 0x24 // leap=0, version=4, mode=4 (server)
-		response[1] = 1
-		copy(response[24:32], request[40:48])
-		copy(response[32:40], stamp[:])
-		copy(response[40:48], stamp[:])
-		_, err = server.WriteToUDP(response, peer)
-		serverErr <- err
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	sample, err := queryNTPAddress(ctx, "local-test", server.LocalAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatalf("queryNTPAddress() error = %v", err)
-	}
-	if err := <-serverErr; err != nil {
-		t.Fatalf("test NTP server error = %v", err)
-	}
-	offsetMilliseconds := sample.offsetNanos / nanosecondsPerMilli
-	if offsetMilliseconds < 200 || offsetMilliseconds > 300 {
-		t.Fatalf("offset = %dms, want 200..300ms", offsetMilliseconds)
-	}
-	if sample.server != "local-test" {
-		t.Fatalf("server = %q, want local-test", sample.server)
+	headers := http.Header{responseDateHeader: []string{"2026-08-13 00:23:22"}}
+	if timestamp, ok := responseDateTime(headers); ok {
+		t.Fatalf("invalid Date header parsed as %d", timestamp)
 	}
 }
 
-func TestSelectMedianNTPSampleRejectsOutlierAndBreaksTieByRTT(t *testing.T) {
-	samples := []ntpSample{
-		{server: "low-outlier", offsetNanos: -1_000 * nanosecondsPerMilli, roundTripMS: 1},
-		{server: "near-slow", offsetNanos: 10 * nanosecondsPerMilli, roundTripMS: 20},
-		{server: "near-fast", offsetNanos: 12 * nanosecondsPerMilli, roundTripMS: 5},
-		{server: "high-outlier", offsetNanos: 1_000 * nanosecondsPerMilli, roundTripMS: 1},
-	}
-	selected := selectMedianNTPSample(samples)
-	if selected.server != "near-fast" {
-		t.Fatalf("selected server = %q, want near-fast", selected.server)
-	}
-}
-
-func TestCalibratedClockPrefersFreshNTPAndFallsBackToServer(t *testing.T) {
+func TestCalibratedClockUsesFreshDateAndExpiresOldSample(t *testing.T) {
 	now := time.Now()
 	clock := calibratedClock{
-		ntp: &clockCalibration{
-			source:           "ntp:test",
+		calibration: &clockCalibration{
+			source:           "date",
 			anchor:           now,
 			accurateAtAnchor: now.UnixMilli() + 200,
 		},
-		server: &clockCalibration{
-			source:           "server",
-			anchor:           now,
-			accurateAtAnchor: now.UnixMilli() + 100,
-		},
 	}
 	snapshot := clock.snapshot(now.Add(time.Second))
-	if snapshot.Source == nil || *snapshot.Source != "ntp:test" {
-		t.Fatalf("fresh Source = %v, want ntp:test", snapshot.Source)
+	if snapshot.Source == nil || *snapshot.Source != "date" {
+		t.Fatalf("fresh Source = %v, want date", snapshot.Source)
 	}
 
-	clock.ntp.anchor = now.Add(-maxCalibrationAge - time.Second)
+	clock.calibration.anchor = now.Add(-maxCalibrationAge - time.Second)
 	snapshot = clock.snapshot(now.Add(time.Second))
-	if snapshot.Source == nil || *snapshot.Source != "server" {
-		t.Fatalf("fallback Source = %v, want server", snapshot.Source)
+	if snapshot.AccurateTS != nil || snapshot.Source != nil {
+		t.Fatalf("expired snapshot = %+v, want uncalibrated", snapshot)
+	}
+}
+
+func TestCalibratedClockSkipsDateUpdateWithinThreshold(t *testing.T) {
+	anchor := time.Unix(1_000, 0)
+	clock := calibratedClock{
+		calibration: &clockCalibration{
+			source:           "date",
+			anchor:           anchor,
+			accurateAtAnchor: anchor.UnixMilli(),
+		},
+	}
+
+	if _, updated := clock.updateDate(anchor.Add(25*time.Second).UnixMilli(), 0, anchor); updated {
+		t.Fatal("Date update inside threshold was not skipped")
+	}
+	snapshot := clock.snapshot(anchor)
+	if snapshot.AccurateTS == nil || *snapshot.AccurateTS != anchor.UnixMilli() {
+		t.Fatalf("AccurateTS = %v, want %d", snapshot.AccurateTS, anchor.UnixMilli())
+	}
+}
+
+func TestCalibratedClockUpdatesDateBeyondThreshold(t *testing.T) {
+	anchor := time.Unix(1_000, 0)
+	clock := calibratedClock{
+		calibration: &clockCalibration{
+			source:           "date",
+			anchor:           anchor,
+			accurateAtAnchor: anchor.UnixMilli(),
+		},
+	}
+
+	want := anchor.Add(31 * time.Second).UnixMilli()
+	if _, updated := clock.updateDate(want, 0, anchor); !updated {
+		t.Fatal("Date update beyond threshold was skipped")
+	}
+	snapshot := clock.snapshot(anchor)
+	if snapshot.AccurateTS == nil || *snapshot.AccurateTS != want {
+		t.Fatalf("AccurateTS = %v, want %d", snapshot.AccurateTS, want)
 	}
 }
 
 func TestCalibratedClockCorrectsSamplesCollectedBeforeCalibration(t *testing.T) {
 	anchor := time.Now()
 	clock := calibratedClock{
-		ntp: &clockCalibration{
-			source:           "ntp:test",
+		calibration: &clockCalibration{
+			source:           "date",
 			anchor:           anchor,
 			accurateAtAnchor: 1_000_000,
 		},
@@ -158,8 +139,8 @@ func TestSamplesAndBootTimeUseCalibratedTimeline(t *testing.T) {
 	offset := int64(500)
 	agent := Agent{
 		clock: calibratedClock{
-			ntp: &clockCalibration{
-				source:           "ntp:test",
+			calibration: &clockCalibration{
+				source:           "date",
 				anchor:           anchor,
 				accurateAtAnchor: anchor.UnixMilli() + offset,
 			},
@@ -184,20 +165,6 @@ func TestSamplesAndBootTimeUseCalibratedTimeline(t *testing.T) {
 	}
 }
 
-func TestNTPRefreshIsRateLimited(t *testing.T) {
-	now := time.Now()
-	clock := calibratedClock{}
-	if !clock.beginNTPRefresh(now) {
-		t.Fatal("first NTP refresh was not allowed")
-	}
-	if clock.beginNTPRefresh(now.Add(ntpRefreshInterval - time.Millisecond)) {
-		t.Fatal("NTP refresh inside interval was allowed")
-	}
-	if !clock.beginNTPRefresh(now.Add(ntpRefreshInterval)) {
-		t.Fatal("NTP refresh at interval boundary was not allowed")
-	}
-}
-
 func TestUncalibratedClockSerializesNullCalibrationFields(t *testing.T) {
 	snapshot := (&calibratedClock{}).snapshot(time.UnixMilli(1234))
 	encoded, err := json.Marshal(snapshot)
@@ -210,49 +177,62 @@ func TestUncalibratedClockSerializesNullCalibrationFields(t *testing.T) {
 	}
 }
 
-func TestResponseServerTimeFormats(t *testing.T) {
-	const timestamp = int64(1_754_300_060_123)
-	tests := []struct {
-		name    string
-		body    string
-		headers http.Header
-	}{
-		{name: "form body", body: "server_time=1754300060123"},
-		{name: "form with config", body: "server_time=1754300060123&report_interval=60"},
-		{name: "json body", body: `{"server_time":1754300060123}`},
-		{name: "header", body: "OK", headers: http.Header{serverTimeHeader: []string{"1754300060123"}}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, ok := responseServerTime([]byte(test.body), test.headers)
-			if !ok || got != timestamp {
-				t.Fatalf("responseServerTime() = (%d, %v), want (%d, true)", got, ok, timestamp)
-			}
-		})
-	}
-}
-
-func TestHandleReportResponseCalibratesServerTimeWithoutConfig(t *testing.T) {
+func TestHandleReportResponseCalibratesDateHeaderWithoutConfig(t *testing.T) {
 	agent := Agent{log: newLogger(false)}
 	started := time.Now()
 	completed := started.Add(80 * time.Millisecond)
+	dateTime := time.Date(2026, time.August, 13, 0, 23, 22, 0, time.UTC)
 	agent.handleTimedReportResponse(
 		http.StatusOK,
-		[]byte("server_time=1754300060123"),
-		http.Header{},
+		[]byte("OK"),
+		http.Header{responseDateHeader: []string{"Thu, 13 Aug 2026 00:23:22 GMT"}},
 		started,
 		completed,
 	)
 	snapshot := agent.clock.snapshot(completed)
-	if snapshot.Source == nil || *snapshot.Source != "server" {
-		t.Fatalf("Source = %v, want server", snapshot.Source)
+	if snapshot.Source == nil || *snapshot.Source != "date" {
+		t.Fatalf("Source = %v, want date", snapshot.Source)
 	}
-	if snapshot.AccurateTS == nil || *snapshot.AccurateTS != 1_754_300_060_163 {
-		t.Fatalf("AccurateTS = %v, want 1754300060163", snapshot.AccurateTS)
+	want := dateTime.UnixMilli() + 40
+	if snapshot.AccurateTS == nil || *snapshot.AccurateTS != want {
+		t.Fatalf("AccurateTS = %v, want %d", snapshot.AccurateTS, want)
 	}
 }
 
-func TestServerTimeCoexistsWithURLConfigResponse(t *testing.T) {
+func TestReportDateCalibrationAnchorsAtHeaderReceiveTime(t *testing.T) {
+	const slowBodyDelay = 200 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(responseDateHeader, "Thu, 13 Aug 2026 00:23:22 GMT")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(slowBodyDelay)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer server.Close()
+
+	agent := Agent{
+		cfg: Config{
+			ServerID:  "sid",
+			Secret:    "secret",
+			WorkerURL: server.URL,
+		},
+		log: newLogger(false),
+	}
+	agent.report(Metrics{})
+
+	snapshot := agent.clock.snapshot(time.Now())
+	if snapshot.SampleAgeMS == nil {
+		t.Fatal("SampleAgeMS = nil, want calibrated Date sample")
+	}
+	minAgeMS := uint64((slowBodyDelay - 50*time.Millisecond) / time.Millisecond)
+	if *snapshot.SampleAgeMS < minAgeMS {
+		t.Fatalf("SampleAgeMS = %d, want at least %d", *snapshot.SampleAgeMS, minAgeMS)
+	}
+}
+
+func TestDateHeaderCoexistsWithURLConfigResponse(t *testing.T) {
 	tmp := t.TempDir()
 	configFile := tmp + "/config.conf"
 	agent := Agent{
@@ -267,8 +247,11 @@ func TestServerTimeCoexistsWithURLConfigResponse(t *testing.T) {
 		paths: Paths{ConfigFile: configFile, TrafficFile: tmp + "/traffic.dat"},
 		log:   newLogger(false),
 	}
-	headers := http.Header{"X-Agent-Config-Md5": []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
-	body := []byte("server_time=1754300060123&collect_interval=0&report_interval=60&reset_day=1&schema_version=3&interface=")
+	headers := http.Header{
+		responseDateHeader:   []string{"Thu, 13 Aug 2026 00:23:22 GMT"},
+		"X-Agent-Config-Md5": []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+	}
+	body := []byte("collect_interval=0&report_interval=60&reset_day=1&schema_version=3&interface=")
 	started := time.Now()
 	agent.handleTimedReportResponse(http.StatusOK, body, headers, started, started.Add(20*time.Millisecond))
 
@@ -276,7 +259,7 @@ func TestServerTimeCoexistsWithURLConfigResponse(t *testing.T) {
 		t.Fatalf("ConfigMD5 = %q", agent.cfg.ConfigMD5)
 	}
 	snapshot := agent.clock.snapshot(started.Add(20 * time.Millisecond))
-	if snapshot.Source == nil || *snapshot.Source != "server" {
-		t.Fatalf("Source = %v, want server", snapshot.Source)
+	if snapshot.Source == nil || *snapshot.Source != "date" {
+		t.Fatalf("Source = %v, want date", snapshot.Source)
 	}
 }
