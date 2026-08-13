@@ -1,6 +1,9 @@
 package cfprobe
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestManagementCommandsSystemd(t *testing.T) {
 	paths := Paths{ServiceName: "cf-probe"}
@@ -44,6 +47,34 @@ func TestManagementCommandsProcd(t *testing.T) {
 		{labelStop, "/etc/init.d/cf-probe stop"},
 	}
 	assertManagementCommands(t, cmds, want)
+}
+
+func TestManagementCommandsWindows(t *testing.T) {
+	paths := Paths{
+		ServiceName: "cf-probe",
+		LogFile:     `C:\ProgramData\cf-probe\cf-probe.log`,
+	}
+	cmds := managementCommands(paths, "windows")
+	want := []managementCommand{
+		{labelRealtimeLog, `powershell -NoProfile -Command "Get-Content -Path 'C:\ProgramData\cf-probe\cf-probe.log' -Wait"`},
+		{labelStatus, "schtasks /Query /TN cf-probe"},
+		{labelStop, "schtasks /End /TN cf-probe"},
+	}
+	assertManagementCommands(t, cmds, want)
+}
+
+func TestFormatManagementCommandUsesCopyableCommandLine(t *testing.T) {
+	cmd := managementCommand{
+		label:   labelRealtimeLog,
+		command: `powershell -NoProfile -Command "Get-Content -Path 'C:\ProgramData\cf-probe\cf-probe.log' -Wait"`,
+	}
+	got := formatManagementCommand(cmd)
+	if strings.Contains(got, " : powershell") {
+		t.Fatalf("command rendered on label line: %q", got)
+	}
+	if !strings.Contains(got, " :\n      powershell") {
+		t.Fatalf("command not rendered on its own indented line: %q", got)
+	}
 }
 
 func TestManagementCommandsLaunchdUser(t *testing.T) {

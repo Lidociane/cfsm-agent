@@ -81,6 +81,9 @@ func Install(opts InstallOptions, version string) error {
 	if err := writeService(paths, opts.Debug); err != nil {
 		return err
 	}
+	if err := prepareManagementLogFile(paths); err != nil {
+		return err
+	}
 	if !opts.NoStart {
 		if err := startService(paths, opts.Debug); err != nil {
 			return err
@@ -210,6 +213,39 @@ func printBanner(version string) {
 	fmt.Println("    CF-Server-Monitor Go Probe")
 	fmt.Printf("    Version: %s\n", version)
 	fmt.Println("===========================================")
+}
+
+func prepareManagementLogFile(paths Paths) error {
+	logFile := managementLogFile(paths, serviceSystem(paths))
+	if logFile == "" {
+		return nil
+	}
+	return ensureLogFile(logFile)
+}
+
+func managementLogFile(paths Paths, system string) string {
+	switch system {
+	case "openrc", "launchd", "synology-rc", "background", "windows":
+		return paths.LogFile
+	case "upstart":
+		return filepath.Join("/var/log/upstart", paths.ServiceName+".log")
+	default:
+		return ""
+	}
+}
+
+func ensureLogFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func printInstallSummary(paths Paths, opts InstallOptions) {
@@ -593,6 +629,9 @@ esac
 }
 
 func writeWindowsService(paths Paths, debug bool) error {
+	if err := writeWindowsTaskWrapper(paths, debug); err != nil {
+		return err
+	}
 	_ = runCommand("schtasks", "/Delete", "/TN", paths.ServiceName, "/F")
 	taskRun := strings.Join(windowsServiceArgs(paths, debug), " ")
 	if err := runCommand("schtasks", "/Create", "/TN", paths.ServiceName, "/SC", "ONSTART", "/TR", taskRun, "/RL", "HIGHEST", "/RU", "SYSTEM", "/F"); err != nil {

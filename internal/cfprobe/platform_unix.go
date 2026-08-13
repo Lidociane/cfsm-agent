@@ -867,6 +867,10 @@ func windowsServiceArgs(_ Paths, _ bool) []string {
 	return nil
 }
 
+func writeWindowsTaskWrapper(_ Paths, _ bool) error {
+	return nil
+}
+
 var errWindowsService = errors.New("Windows 服务管理仅在 Windows 平台可用")
 
 func chmodExecutable(path string) error {

@@ -130,6 +130,35 @@ func TestWriteLaunchdUserServiceUsesUserPaths(t *testing.T) {
 	}
 }
 
+func TestManagementLogFileByServiceSystem(t *testing.T) {
+	paths := Paths{
+		ServiceName: "cf-probe",
+		LogFile:     "/var/log/cf-probe.log",
+	}
+	tests := []struct {
+		system string
+		want   string
+	}{
+		{"systemd", ""},
+		{"systemd-user", ""},
+		{"procd", ""},
+		{"openrc", "/var/log/cf-probe.log"},
+		{"launchd", "/var/log/cf-probe.log"},
+		{"synology-rc", "/var/log/cf-probe.log"},
+		{"background", "/var/log/cf-probe.log"},
+		{"windows", "/var/log/cf-probe.log"},
+		{"upstart", filepath.Join("/var/log/upstart", "cf-probe.log")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.system, func(t *testing.T) {
+			if got := managementLogFile(paths, tt.system); got != tt.want {
+				t.Fatalf("managementLogFile() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMigrateTrafficMovesLegacyTraffic(t *testing.T) {
 	tmp := t.TempDir()
 	oldDir := filepath.Join(tmp, "old")

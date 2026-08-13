@@ -44,8 +44,12 @@ func printManagementCommands(paths Paths) {
 	}
 	fmt.Printf("  %s :\n", labelCommands)
 	for _, cmd := range cmds {
-		fmt.Printf("    %s %s : %s\n", bullet, cmd.label, cmd.command)
+		fmt.Print(formatManagementCommand(cmd))
 	}
+}
+
+func formatManagementCommand(cmd managementCommand) string {
+	return fmt.Sprintf("    %s %s :\n      %s\n", bullet, cmd.label, cmd.command)
 }
 
 func managementCommands(paths Paths, system string) []managementCommand {

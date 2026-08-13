@@ -234,11 +234,35 @@ func quoteShell(s string) string {
 }
 
 func windowsServiceArgs(paths Paths, debug bool) []string {
+	return []string{"cmd.exe", "/D", "/C", quoteWindowsCmdArg(windowsTaskWrapperFile(paths))}
+}
+
+func writeWindowsTaskWrapper(paths Paths, debug bool) error {
+	if err := ensureLogFile(paths.LogFile); err != nil {
+		return err
+	}
 	debugArg := "-debug=0"
 	if debug {
 		debugArg = "-debug=1"
 	}
-	return []string{`"` + paths.BinaryFile + `"`, "run", debugArg}
+	content := strings.Join([]string{
+		"@echo off",
+		"setlocal",
+		"if not exist " + quoteWindowsCmdArg(paths.ConfigDir) + " mkdir " + quoteWindowsCmdArg(paths.ConfigDir),
+		"echo [%DATE% %TIME%] cf-probe task starting >> " + quoteWindowsCmdArg(paths.LogFile),
+		quoteWindowsCmdArg(paths.BinaryFile) + " run " + debugArg + " >> " + quoteWindowsCmdArg(paths.LogFile) + " 2>&1",
+		"exit /b %ERRORLEVEL%",
+		"",
+	}, "\r\n")
+	return writeFileExecutable(windowsTaskWrapperFile(paths), content, 0o644)
+}
+
+func windowsTaskWrapperFile(paths Paths) string {
+	return filepath.Join(paths.ConfigDir, paths.ServiceName+".cmd")
+}
+
+func quoteWindowsCmdArg(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 func chmodExecutable(_ string) error {
