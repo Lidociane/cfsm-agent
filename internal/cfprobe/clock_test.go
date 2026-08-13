@@ -82,7 +82,7 @@ func TestCalibratedClockSkipsDateUpdateWithinThreshold(t *testing.T) {
 		},
 	}
 
-	if _, updated := clock.updateDate(anchor.Add(25*time.Second).UnixMilli(), 0, anchor); updated {
+	if _, updated := clock.updateDate(anchor.Add(15*time.Second).UnixMilli(), 0, anchor); updated {
 		t.Fatal("Date update inside threshold was not skipped")
 	}
 	snapshot := clock.snapshot(anchor)
@@ -101,7 +101,7 @@ func TestCalibratedClockUpdatesDateBeyondThreshold(t *testing.T) {
 		},
 	}
 
-	want := anchor.Add(31 * time.Second).UnixMilli()
+	want := anchor.Add(21 * time.Second).UnixMilli()
 	if _, updated := clock.updateDate(want, 0, anchor); !updated {
 		t.Fatal("Date update beyond threshold was skipped")
 	}

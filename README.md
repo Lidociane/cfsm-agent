@@ -23,7 +23,7 @@ wget -O- https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh
 ```
 
 ### 普通用户安装（非 root）
-Linux 非 root 执行安装时会使用当前用户，不会新建用户；二进制、配置和流量文件会写入 `~/.cf-probe/`，自启动使用 `systemd --user`。部分 Linux 系统从旧的 root Go 版切换到非 root 安装时，建议先在 root 下卸载旧版：
+仅支持 `systemd --user` 的 Linux 可使用非 root 安装；执行安装时会使用当前用户，不会新建用户；二进制、配置和流量文件会写入 `~/.cf-probe/`，自启动使用 `systemd --user`。Synology DSM、OpenWrt、Alpine/OpenRC 以及其他不支持 `systemd --user` 的系统请使用 root 权限安装。部分 Linux 系统从旧的 root Go 版切换到非 root 安装时，建议先在 root 下卸载旧版：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- uninstall
@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 
 macOS 固定使用当前普通用户安装，写入 `~/.cf-probe/`，自启动使用 `~/Library/LaunchAgents/`，不要使用 `sudo/root` 安装。macOS 如果检测到旧的 root/system 版本，会提示先执行 `sudo /usr/local/bin/cf-probe uninstall` 清理旧版，再以普通用户安装。
 
-Linux 如果已有非 root 用户，先直接登录该用户并开启 linger，以支持退出登录后后台运行和自启动：
+支持 `systemd --user` 的 Linux 如果已有非 root 用户，先直接登录该用户并开启 linger，以支持退出登录后后台运行和自启动：
 
 ```bash
 loginctl enable-linger
@@ -182,7 +182,7 @@ Linux、OpenWrt、Synology DSM、FreeBSD、macOS：
 curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- uninstall
 ```
 
-普通用户执行卸载只清理当前用户的 `~/.cf-probe/`、Linux `systemd --user` 或 macOS LaunchAgent 自启动项；root 执行卸载清理系统级安装。macOS root 卸载会同时清理 sudo 调用者对应的用户版安装；旧 root/system 版请先执行 `sudo /usr/local/bin/cf-probe uninstall` 清理，再以普通用户安装。
+普通用户执行卸载只清理当前用户的 `~/.cf-probe/`、支持 `systemd --user` 的 Linux 用户服务或 macOS LaunchAgent 自启动项；Synology DSM、OpenWrt、Alpine/OpenRC 以及其他系统级安装请使用 root 权限卸载。root 执行卸载清理系统级安装。macOS root 卸载会同时清理 sudo 调用者对应的用户版安装；旧 root/system 版请先执行 `sudo /usr/local/bin/cf-probe uninstall` 清理，再以普通用户安装。
 
 Windows 请使用管理员权限打开 PowerShell：
 
@@ -305,7 +305,7 @@ Agent 会按 `REPORT_INTERVAL` 向 `WORKER_URL` 发起 `POST` 请求，`Content-
 | `round_trip_ms` | number/null | 最近一次成功校准请求的往返耗时 |
 | `sample_age_ms` | number/null | 最近校准样本到本次组包的单调时钟年龄 |
 
-Agent 只使用 Worker 成功响应里的 HTTP `Date` 头做时间校准。响应头示例：`Date: Thu, 13 Aug 2026 00:23:22 GMT`。Agent 会按该格式解析为 Unix 毫秒时间戳，并结合本次请求 RTT 锚定到单调时钟。若新 `Date` 样本与当前已校准时间的差值在 30 秒内，则跳过更新；首次校准、校准过期或差值超过 30 秒时才覆盖。校准样本最长使用 24 小时。上报前会用同一锚点换算 `samples[].ts`，并校正 `metrics.boot_time`。Agent 不修改系统时间。
+Agent 只使用 Worker 成功响应里的 HTTP `Date` 头做时间校准。响应头示例：`Date: Thu, 13 Aug 2026 00:23:22 GMT`。Agent 会按该格式解析为 Unix 毫秒时间戳，并结合本次请求 RTT 锚定到单调时钟。若新 `Date` 样本与当前已校准时间的差值在 20 秒内，则跳过更新；首次校准、校准过期或差值超过 20 秒时才覆盖。校准样本最长使用 24 小时。上报前会用同一锚点换算 `samples[].ts`，并校正 `metrics.boot_time`。Agent 不修改系统时间。
 
 `metrics` 字段：
 

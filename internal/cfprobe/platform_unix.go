@@ -325,8 +325,11 @@ func requireInstallPermission(paths Paths) error {
 			}
 			return nil
 		}
+		if platform := nonRootSystemServicePlatform(); platform != "" {
+			return fmt.Errorf("%s 当前仅支持 root/system 服务安装，请使用 root 权限重新执行安装命令", platform)
+		}
 		if runtime.GOOS != "linux" || !systemdUserSupported() {
-			return errors.New("当前系统不支持非 root 运行（未检测到 systemd 用户服务能力），请使用 root 权限运行")
+			return errors.New("当前系统不支持非 root 运行（未检测到 systemd 用户服务能力），请使用 root 权限重新执行安装命令")
 		}
 		if !systemdUserAvailable() {
 			return fmt.Errorf("无法连接到 systemd --user 服务\n"+
@@ -348,17 +351,55 @@ func requireInstallPermission(paths Paths) error {
 		return nil
 	}
 	if !isRootUser() {
-		return errors.New("请使用 root 权限运行: sudo ./cf-probe install ...")
+		return errors.New("请使用 root 权限重新执行安装命令")
 	}
 	return nil
 }
 
+func nonRootSystemServicePlatform() string {
+	if runtime.GOOS == "darwin" {
+		return ""
+	}
+	if runtime.GOOS != "linux" {
+		return platformName()
+	}
+	if isSynology() {
+		return "Synology DSM"
+	}
+	if isOpenWrt() {
+		return "OpenWrt"
+	}
+	if systemdUserSupported() {
+		return ""
+	}
+	platform := platformName()
+	switch initSystem() {
+	case "openrc":
+		if platform == "Alpine Linux" {
+			return "Alpine Linux/OpenRC"
+		}
+		return platform + "/OpenRC"
+	case "procd":
+		return "OpenWrt"
+	case "synology-rc":
+		return "Synology DSM"
+	case "upstart":
+		return platform + "/Upstart"
+	case "background":
+		return platform + "/background"
+	}
+	return ""
+}
+
 func requireUninstallPermission(paths Paths) error {
 	if paths.UserMode {
+		if platform := nonRootSystemServicePlatform(); platform != "" {
+			return fmt.Errorf("%s 当前仅支持 root/system 服务卸载，请使用 root 权限重新执行卸载命令", platform)
+		}
 		return nil
 	}
 	if !isRootUser() {
-		return errors.New("请使用 root 权限运行卸载: sudo ./cf-probe uninstall")
+		return errors.New("请使用 root 权限重新执行卸载命令")
 	}
 	if conflicts := userInstallConflicts(); len(conflicts) > 0 {
 		return fmt.Errorf("检测到已有非 root 用户版 cf-probe 安装: %s；root 卸载只清理系统级安装，请先切换到对应用户执行卸载",

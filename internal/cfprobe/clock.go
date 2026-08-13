@@ -10,7 +10,7 @@ import (
 
 const (
 	maxCalibrationAge        = 24 * time.Hour
-	dateCalibrationThreshold = 30 * time.Second
+	dateCalibrationThreshold = 20 * time.Second
 	responseDateHeader       = "Date"
 )
 
