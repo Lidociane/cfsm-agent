@@ -45,6 +45,14 @@ func collectBasicStats() BasicStats {
 	}
 }
 
+func readMemoryStats() (MemoryStats, bool) {
+	total, used := windowsMemoryMB()
+	if total == 0 {
+		return MemoryStats{}, false
+	}
+	return MemoryStats{MemTotalMB: total, MemUsedMB: used}, true
+}
+
 func windowsPowerShellOutput(script string) string {
 	prefix := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; "
 	return commandOutput("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", prefix+script)

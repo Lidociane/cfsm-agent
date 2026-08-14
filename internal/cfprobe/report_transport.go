@@ -87,15 +87,11 @@ func reportWebSocketURL(raw string) (string, error) {
 }
 
 func wssReportInterval(reportIntervalSec int) time.Duration {
-	reportInterval := time.Duration(reportIntervalSec) * time.Second
-	if reportInterval < time.Second {
-		reportInterval = time.Duration(defaultReportIntervalSec) * time.Second
+	if reportIntervalSec < 1 {
+		reportIntervalSec = defaultReportIntervalSec
 	}
-	interval := reportInterval / 20
-	if interval < time.Second {
-		return time.Second
-	}
-	return interval
+	seconds := (reportIntervalSec + 19) / 20
+	return time.Duration(seconds) * time.Second
 }
 
 func (r *reportTransport) run(ctx context.Context) {

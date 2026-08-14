@@ -27,12 +27,15 @@ func TestReportWebSocketURLConvertsHTTPUpdateURL(t *testing.T) {
 	}
 }
 
-func TestWSSReportIntervalDividesReportIntervalByTwenty(t *testing.T) {
+func TestWSSReportIntervalRoundsUpReportIntervalByTwenty(t *testing.T) {
 	if got := wssReportInterval(60); got != 3*time.Second {
 		t.Fatalf("wssReportInterval(60) = %s, want 3s", got)
 	}
-	if got := wssReportInterval(30); got != 1500*time.Millisecond {
-		t.Fatalf("wssReportInterval(30) = %s, want 1.5s", got)
+	if got := wssReportInterval(30); got != 2*time.Second {
+		t.Fatalf("wssReportInterval(30) = %s, want 2s", got)
+	}
+	if got := wssReportInterval(21); got != 2*time.Second {
+		t.Fatalf("wssReportInterval(21) = %s, want 2s", got)
 	}
 }
 

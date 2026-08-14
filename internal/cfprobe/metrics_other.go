@@ -29,6 +29,10 @@ func collectBasicStats() BasicStats {
 	}
 }
 
+func readMemoryStats() (MemoryStats, bool) {
+	return MemoryStats{}, false
+}
+
 func readNetBytes(_ string) NetBytes {
 	return NetBytes{}
 }

@@ -50,6 +50,20 @@ func collectBasicStats() BasicStats {
 	}
 }
 
+func readMemoryStats() (MemoryStats, bool) {
+	memTotal, memUsed := freebsdMemoryMB()
+	swapTotal, swapUsed := freebsdSwapMB()
+	if memTotal == 0 && swapTotal == 0 {
+		return MemoryStats{}, false
+	}
+	return MemoryStats{
+		MemTotalMB:  memTotal,
+		MemUsedMB:   memUsed,
+		SwapTotalMB: swapTotal,
+		SwapUsedMB:  swapUsed,
+	}, true
+}
+
 func readNetBytes(ifaces string) NetBytes {
 	wanted := splitInterfaceSet(ifaces)
 	counters, err := gopsutilNet.IOCounters(true)

@@ -53,6 +53,14 @@ func collectBasicStats() BasicStats {
 	}
 }
 
+func readMemoryStats() (MemoryStats, bool) {
+	total, used := darwinMemoryMB()
+	if total == 0 {
+		return MemoryStats{}, false
+	}
+	return MemoryStats{MemTotalMB: total, MemUsedMB: used}, true
+}
+
 func darwinTopCPUPercent() (float64, bool) {
 	out := commandOutput("top", "-l", "1", "-n", "0", "-s", "0")
 	for _, line := range strings.Split(out, "\n") {

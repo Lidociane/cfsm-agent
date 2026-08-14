@@ -133,6 +133,13 @@ type BasicStats struct {
 	UDPConn     int
 }
 
+type MemoryStats struct {
+	MemTotalMB  uint64
+	MemUsedMB   uint64
+	SwapTotalMB uint64
+	SwapUsedMB  uint64
+}
+
 type NetBytes struct {
 	RX uint64
 	TX uint64

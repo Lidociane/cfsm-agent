@@ -29,10 +29,14 @@ type Agent struct {
 	probes     ProbeSnapshot
 	basic      BasicStats
 	basicAt    time.Time
+	fullAt     time.Time
 	prevNet    NetBytes
 	prevTime   time.Time
 	prevDisk   DiskIOCounters
 	prevDiskAt time.Time
+	diskIO     DiskIOStats
+	monthlyRX  uint64
+	monthlyTX  uint64
 	clock      calibratedClock
 
 	samples    []metricSample
@@ -216,9 +220,13 @@ func (a *Agent) tick() {
 	if !shouldWSSReport && !shouldPostReport && !shouldSample {
 		return
 	}
-	if now.Sub(a.basicAt) >= 60*time.Second || a.basicAt.IsZero() {
+	reportDue := shouldWSSReport || shouldPostReport
+	fullDue := reportDue && (a.fullAt.IsZero() || now.Sub(a.fullAt) >= reportInterval)
+	if fullDue {
 		a.basic = collectBasicStats()
 		a.basicAt = now
+	} else {
+		a.refreshRealtimeBasicStats()
 	}
 	netNow := readNetBytes(a.cfg.Interface)
 	dt := now.Sub(a.prevTime).Seconds()
@@ -243,12 +251,12 @@ func (a *Agent) tick() {
 		cpu = cpuPercentString(usage)
 	}
 
-	rxMonthly, txMonthly := calcMonthlyTraffic(a.paths.TrafficFile, netNow, a.cfg.ResetDay, a.cfg.Interface)
-	diskIO := DiskIOStats{}
-	if shouldWSSReport || shouldPostReport {
-		diskIO = a.sampleDiskIO(now)
+	if fullDue {
+		a.monthlyRX, a.monthlyTX = calcMonthlyTraffic(a.paths.TrafficFile, netNow, a.cfg.ResetDay, a.cfg.Interface)
+		a.diskIO = a.sampleDiskIO(now)
+		a.fullAt = now
 	}
-	m := a.buildMetrics(cpu, netNow, rxSpeed, txSpeed, rxMonthly, txMonthly, diskIO)
+	m := a.buildMetrics(cpu, netNow, rxSpeed, txSpeed, a.monthlyRX, a.monthlyTX, a.diskIO)
 	if shouldSample {
 		a.samples = append(a.samples, metricSample{
 			at:      now,
@@ -267,6 +275,17 @@ func (a *Agent) tick() {
 			a.samples = nil
 		}
 	}
+}
+
+func (a *Agent) refreshRealtimeBasicStats() {
+	mem, ok := readMemoryStats()
+	if !ok {
+		return
+	}
+	a.basic.MemTotalMB = mem.MemTotalMB
+	a.basic.MemUsedMB = mem.MemUsedMB
+	a.basic.SwapTotalMB = mem.SwapTotalMB
+	a.basic.SwapUsedMB = mem.SwapUsedMB
 }
 
 func (a *Agent) sampleDiskIO(now time.Time) DiskIOStats {
@@ -671,6 +690,10 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		a.prevTime = now
 		a.prevDisk = DiskIOCounters{}
 		a.prevDiskAt = time.Time{}
+		a.diskIO = DiskIOStats{}
+		a.monthlyRX = 0
+		a.monthlyTX = 0
+		a.fullAt = time.Time{}
 		a.samples = nil
 		a.lastSample = time.Time{}
 		a.lastReport = time.Time{}

@@ -87,6 +87,19 @@ func collectBasicStats() BasicStats {
 	}
 }
 
+func readMemoryStats() (MemoryStats, bool) {
+	mem := readMemInfo()
+	if mem["MemTotal"] == 0 {
+		return MemoryStats{}, false
+	}
+	return MemoryStats{
+		MemTotalMB:  mem["MemTotal"] / 1024,
+		MemUsedMB:   usedMemMB(mem),
+		SwapTotalMB: mem["SwapTotal"] / 1024,
+		SwapUsedMB:  usedSwapMB(mem),
+	}, true
+}
+
 func readNetBytes(ifaces string) NetBytes {
 	wanted := splitInterfaceSet(ifaces)
 	var total NetBytes
