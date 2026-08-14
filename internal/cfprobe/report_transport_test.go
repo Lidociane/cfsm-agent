@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +168,130 @@ func TestReportTransportProtocolDelayPausesPostFallback(t *testing.T) {
 	}
 	if delay < 119*time.Second {
 		t.Fatalf("pause delay = %s, want at least 119s", delay)
+	}
+}
+
+func TestWSSConfigBodySupportsPayloadObject(t *testing.T) {
+	body, headers, ok := wssConfigBodyAndHeaders(wsServerFrame{
+		Type: "config",
+		Payload: map[string]any{
+			"collect_interval": float64(0),
+			"report_interval":  float64(60),
+			"reset_day":        float64(1),
+			"schema_version":   configSchemaVersion,
+			"interface":        "",
+			"configMd5":        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+	})
+	if !ok {
+		t.Fatal("wssConfigBodyAndHeaders returned ok=false")
+	}
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		t.Fatalf("config body is not query string: %v", err)
+	}
+	if values.Get("report_interval") != "60" {
+		t.Fatalf("report_interval = %q, want 60", values.Get("report_interval"))
+	}
+	if headers.Get("X-Agent-Config-Md5") != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("X-Agent-Config-Md5 = %q", headers.Get("X-Agent-Config-Md5"))
+	}
+}
+
+func TestReportTransportWSSConfigAppliesRemoteConfig(t *testing.T) {
+	tmp := t.TempDir()
+	configFile := tmp + "/config.conf"
+	agent := Agent{
+		cfg: Config{
+			ServerID:       "sid",
+			Secret:         "secret",
+			WorkerURL:      "https://worker.example.com/update",
+			ReportInterval: 60,
+			ResetDay:       1,
+			ConfigMD5:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		paths: Paths{ConfigFile: configFile, TrafficFile: tmp + "/traffic.dat"},
+		log:   newLogger(false),
+	}
+	transport := reportTransport{agent: &agent}
+	transport.handleConfigFrame(wsServerFrame{
+		Type:      "config",
+		Config:    "collect_interval=0&report_interval=120&reset_day=1&schema_version=3&interface=",
+		ConfigMD5: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	})
+
+	if agent.cfg.ReportInterval != 120 {
+		t.Fatalf("ReportInterval = %d, want 120", agent.cfg.ReportInterval)
+	}
+	if agent.cfg.ConfigMD5 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("ConfigMD5 = %q", agent.cfg.ConfigMD5)
+	}
+}
+
+func TestReportTransportWSSConfigAllowsMissingMD5(t *testing.T) {
+	tmp := t.TempDir()
+	agent := Agent{
+		cfg: Config{
+			ServerID:       "sid",
+			Secret:         "secret",
+			WorkerURL:      "https://worker.example.com/update",
+			ReportInterval: 60,
+			ResetDay:       1,
+			ConfigMD5:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		paths: Paths{ConfigFile: tmp + "/config.conf", TrafficFile: tmp + "/traffic.dat"},
+		log:   newLogger(false),
+	}
+	transport := reportTransport{agent: &agent}
+	transport.handleConfigFrame(wsServerFrame{
+		Type:   "config",
+		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=3&interface=",
+	})
+
+	if agent.cfg.ReportInterval != 120 {
+		t.Fatalf("ReportInterval = %d, want 120", agent.cfg.ReportInterval)
+	}
+	if agent.cfg.ConfigMD5 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("ConfigMD5 changed to %q without remote md5", agent.cfg.ConfigMD5)
+	}
+}
+
+func TestReportTransportWSSConfigThrottlesToOneMinute(t *testing.T) {
+	tmp := t.TempDir()
+	agent := Agent{
+		cfg: Config{
+			ServerID:       "sid",
+			Secret:         "secret",
+			WorkerURL:      "https://worker.example.com/update",
+			ReportInterval: 60,
+			ResetDay:       1,
+			ConfigMD5:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		paths: Paths{ConfigFile: tmp + "/config.conf", TrafficFile: tmp + "/traffic.dat"},
+		log:   newLogger(false),
+	}
+	transport := reportTransport{agent: &agent}
+	transport.handleConfigFrame(wsServerFrame{
+		Type:   "config",
+		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=3&interface=",
+	})
+	transport.handleConfigFrame(wsServerFrame{
+		Type:   "config",
+		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=3&interface=",
+	})
+	if agent.cfg.ReportInterval != 120 {
+		t.Fatalf("ReportInterval after throttled config = %d, want 120", agent.cfg.ReportInterval)
+	}
+
+	transport.mu.Lock()
+	transport.lastConfigAt = time.Now().Add(-wssConfigMinInterval)
+	transport.mu.Unlock()
+	transport.handleConfigFrame(wsServerFrame{
+		Type:   "config",
+		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=3&interface=",
+	})
+	if agent.cfg.ReportInterval != 180 {
+		t.Fatalf("ReportInterval after throttle window = %d, want 180", agent.cfg.ReportInterval)
 	}
 }
 

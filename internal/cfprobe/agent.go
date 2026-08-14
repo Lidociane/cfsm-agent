@@ -587,6 +587,14 @@ func (a *Agent) networkWorker(ctx context.Context) {
 var remoteBodyRE = regexp.MustCompile(`^[A-Za-z0-9_=&.,:%+\-\*\?\[\]]*$`)
 
 func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
+	return a.applyRemoteConfigWithOptions(body, headers, false)
+}
+
+func (a *Agent) applyWSSRemoteConfig(body []byte, headers http.Header) error {
+	return a.applyRemoteConfigWithOptions(body, headers, true)
+}
+
+func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, allowMissingMD5 bool) error {
 	if len(body) == 0 {
 		return errors.New("empty body")
 	}
@@ -645,9 +653,8 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		return errors.New("no config fields")
 	}
 	newMD5 := strings.ToLower(strings.TrimSpace(headers.Get("X-Agent-Config-Md5")))
-	if len(newMD5) != 32 || strings.ContainsFunc(newMD5, func(r rune) bool {
-		return !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f')
-	}) {
+	hasRemoteMD5 := validConfigMD5(newMD5)
+	if !hasRemoteMD5 && !allowMissingMD5 {
 		return errors.New("invalid remote md5")
 	}
 	collect := parseIntDefault(values.Get("collect_interval"), -1)
@@ -672,7 +679,13 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 	if err != nil {
 		return err
 	}
-	if newMD5 != a.cfg.ConfigMD5 {
+	shouldApply := false
+	if hasRemoteMD5 {
+		shouldApply = newMD5 != a.cfg.ConfigMD5
+	} else {
+		shouldApply = a.remoteConfigDiffers(values, collect, report, reset, iface)
+	}
+	if shouldApply {
 		a.cfg.CollectInterval = collect
 		a.cfg.ReportInterval = report
 		a.cfg.ResetDay = reset
@@ -681,7 +694,9 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		a.cfg.CMNode = values.Get("custom_cm")
 		a.cfg.BDNode = values.Get("custom_bd")
 		a.cfg.Interface = iface
-		a.cfg.ConfigMD5 = newMD5
+		if hasRemoteMD5 {
+			a.cfg.ConfigMD5 = newMD5
+		}
 		if err := writeConfig(a.paths.ConfigFile, a.cfg); err != nil {
 			return err
 		}
@@ -698,7 +713,7 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		a.lastSample = time.Time{}
 		a.lastReport = time.Time{}
 		a.lastPost = time.Time{}
-		a.log.info("dynamic configuration applied md5=%s interface=%s", newMD5, firstNonEmpty(iface, "auto"))
+		a.log.info("dynamic configuration applied md5=%s interface=%s", firstNonEmpty(a.cfg.ConfigMD5, "none"), firstNonEmpty(iface, "auto"))
 	}
 	if hasCorrection {
 		rx := values.Get("rx_correction")
@@ -709,6 +724,23 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		_ = a.sendCorrectionConfirm(rx, tx)
 	}
 	return nil
+}
+
+func validConfigMD5(value string) bool {
+	return len(value) == 32 && !strings.ContainsFunc(value, func(r rune) bool {
+		return !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f')
+	})
+}
+
+func (a *Agent) remoteConfigDiffers(values url.Values, collect, report, reset int, iface string) bool {
+	return a.cfg.CollectInterval != collect ||
+		a.cfg.ReportInterval != report ||
+		a.cfg.ResetDay != reset ||
+		a.cfg.CTNode != values.Get("custom_ct") ||
+		a.cfg.CUNode != values.Get("custom_cu") ||
+		a.cfg.CMNode != values.Get("custom_cm") ||
+		a.cfg.BDNode != values.Get("custom_bd") ||
+		a.cfg.Interface != iface
 }
 
 func inIntSet(v int, allowed ...int) bool {

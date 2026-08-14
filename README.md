@@ -222,6 +222,30 @@ WSS 可用时，Agent 按 `REPORT_INTERVAL / 20` 并向上取整到秒发送实�
 
 收到 error 后 Agent 会立即关闭当前 WSS，并暂停 WSS 和 POST fallback 120 秒后再重试。
 
+WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里的 query-string body；Agent 侧最短每 1 分钟处理一次 WSS 配置下发，服务端不需要在每个 ack 中都携带配置。`configMd5` 可选，带上时会按旧 `X-Agent-Config-Md5` 逻辑更新本地配置版本；不带时 Agent 会按配置字段是否变化决定是否写入本地配置。
+
+```json
+{
+  "type": "config",
+  "body": "collect_interval=0&report_interval=60&reset_day=1&schema_version=3&interface="
+}
+```
+
+也可以把配置放在 `payload` 对象中：
+
+```json
+{
+  "type": "config",
+  "payload": {
+    "collect_interval": 0,
+    "report_interval": 60,
+    "reset_day": 1,
+    "schema_version": 3,
+    "interface": ""
+  }
+}
+```
+
 完整上报结构如下：
 
 ```json

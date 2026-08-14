@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ const (
 	wssHandshakeTimeout   = 10 * time.Second
 	wssHelloTimeout       = 10 * time.Second
 	wssWriteTimeout       = 8 * time.Second
+	wssConfigMinInterval  = time.Minute
 )
 
 type reportTransport struct {
@@ -30,6 +32,7 @@ type reportTransport struct {
 	pauseUntil       time.Time
 	pauseReason      string
 	lastPostDelayLog time.Time
+	lastConfigAt     time.Time
 }
 
 type wsProtocolDelayError struct {
@@ -53,6 +56,13 @@ type wsServerFrame struct {
 	NextD1WriteAfterMs *int64 `json:"nextD1WriteAfterMs"`
 	Error              string `json:"error"`
 	Code               int    `json:"code"`
+	Body               string `json:"body"`
+	Config             string `json:"config"`
+	ConfigMD5          string `json:"config_md5"`
+	ConfigMD5Camel     string `json:"configMd5"`
+	MD5                string `json:"md5"`
+	Payload            any    `json:"payload"`
+	Headers            any    `json:"headers"`
 }
 
 func newReportTransport(a *Agent) *reportTransport {
@@ -207,15 +217,149 @@ func (r *reportTransport) readLoop(ctx context.Context, conn *webSocketConn) err
 				nextD1 = *frame.NextD1WriteAfterMs
 			}
 			r.agent.log.debugf("WSS ack ts=%d persisted=%v nextD1WriteAfterMs=%d", frame.TS, persisted, nextD1)
+			if body, headers, ok := wssConfigBodyAndHeaders(frame); ok {
+				r.applyConfigBody(body, headers)
+			}
 		case "error":
 			reason := firstNonEmpty(frame.Error, "server_error")
 			r.agent.log.info("WSS error ts=%d code=%d error=%s", frame.TS, frame.Code, reason)
 			return &wsProtocolDelayError{reason: fmt.Sprintf("server error code=%d error=%s", frame.Code, reason)}
+		case "config", "remote_config":
+			r.handleConfigFrame(frame)
 		case "hello":
 			r.agent.log.debugf("WSS hello repeated ts=%d", frame.TS)
 		default:
 			r.agent.log.debugf("WSS message ignored type=%q", frame.Type)
 		}
+	}
+}
+
+func (r *reportTransport) handleConfigFrame(frame wsServerFrame) {
+	body, headers, ok := wssConfigBodyAndHeaders(frame)
+	if !ok {
+		r.agent.log.debugf("WSS config ignored: empty body")
+		return
+	}
+	r.applyConfigBody(body, headers)
+}
+
+func (r *reportTransport) applyConfigBody(body []byte, headers http.Header) {
+	if !r.reserveConfigApplySlot() {
+		return
+	}
+	if err := r.agent.applyWSSRemoteConfig(body, headers); err != nil {
+		r.agent.log.warnf("WSS config rejected: %v", err)
+		return
+	}
+	r.agent.log.info("WSS config processed bytes=%d", len(body))
+}
+
+func (r *reportTransport) reserveConfigApplySlot() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	if !r.lastConfigAt.IsZero() && now.Sub(r.lastConfigAt) < wssConfigMinInterval {
+		remaining := wssConfigMinInterval - now.Sub(r.lastConfigAt)
+		r.agent.log.debugf("WSS config delayed remaining=%s", remaining.Round(time.Second))
+		return false
+	}
+	r.lastConfigAt = now
+	return true
+}
+
+func wssConfigBodyAndHeaders(frame wsServerFrame) ([]byte, http.Header, bool) {
+	body := firstNonEmpty(frame.Body, frame.Config)
+	md5 := firstNonEmpty(frame.ConfigMD5, frame.ConfigMD5Camel, frame.MD5)
+	headers := http.Header{}
+	if h := stringMapFromAny(frame.Headers); len(h) > 0 {
+		for key, value := range h {
+			headers.Set(key, value)
+		}
+		md5 = firstNonEmpty(md5, h["X-Agent-Config-Md5"], h["x-agent-config-md5"])
+	}
+	if body == "" {
+		if payloadBody, payloadMD5, payloadHeaders := wssConfigPayload(frame.Payload); payloadBody != "" {
+			body = payloadBody
+			md5 = firstNonEmpty(md5, payloadMD5)
+			for key, value := range payloadHeaders {
+				headers.Set(key, value)
+			}
+		}
+	}
+	if md5 != "" {
+		headers.Set("X-Agent-Config-Md5", md5)
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil, headers, false
+	}
+	return []byte(body), headers, true
+}
+
+func wssConfigPayload(payload any) (string, string, map[string]string) {
+	switch value := payload.(type) {
+	case string:
+		return strings.TrimSpace(value), "", nil
+	case map[string]any:
+		headers := stringMapFromAny(value["headers"])
+		body := firstNonEmpty(wssStringFromAny(value["body"]), wssStringFromAny(value["config"]))
+		md5 := firstNonEmpty(wssStringFromAny(value["config_md5"]), wssStringFromAny(value["configMd5"]), wssStringFromAny(value["md5"]))
+		if body != "" {
+			return body, md5, headers
+		}
+		values := url.Values{}
+		for _, key := range []string{
+			"collect_interval", "report_interval", "reset_day", "schema_version", "interface",
+			"custom_ct", "custom_cu", "custom_cm", "custom_bd",
+			"rx_correction", "tx_correction", "update",
+		} {
+			if raw, ok := value[key]; ok {
+				values.Set(key, wssStringFromAny(raw))
+			}
+		}
+		return values.Encode(), md5, headers
+	default:
+		return "", "", nil
+	}
+}
+
+func stringMapFromAny(raw any) map[string]string {
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for key, value := range values {
+		if s := wssStringFromAny(value); s != "" {
+			out[key] = s
+		}
+	}
+	return out
+}
+
+func wssStringFromAny(v any) string {
+	switch value := v.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case json.Number:
+		return value.String()
+	case float64:
+		asInt := int64(value)
+		if value == float64(asInt) {
+			return strconv.FormatInt(asInt, 10)
+		}
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	case bool:
+		if value {
+			return "1"
+		}
+		return "0"
+	case int:
+		return strconv.Itoa(value)
+	case int64:
+		return strconv.FormatInt(value, 10)
+	default:
+		return ""
 	}
 }
 
