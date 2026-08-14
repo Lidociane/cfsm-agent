@@ -36,8 +36,11 @@ type Agent struct {
 	clock      calibratedClock
 
 	samples    []metricSample
+	lastSample time.Time
 	lastReport time.Time
+	lastPost   time.Time
 	updateMu   sync.Mutex
+	reporter   *reportTransport
 }
 
 const (
@@ -144,6 +147,7 @@ func Run(configFile string, debug bool, version string) error {
 		prevNet:  readNetBytes(cfg.Interface),
 		prevTime: time.Now(),
 	}
+	a.reporter = newReportTransport(a)
 	a.basic = collectBasicStats()
 	a.basicAt = time.Now()
 
@@ -152,6 +156,7 @@ func Run(configFile string, debug bool, version string) error {
 		cfg.ServerID, cfg.WorkerURL, cfg.ReportInterval, cfg.CollectInterval, cfg.ResetDay, firstNonEmpty(cfg.Interface, "auto"), cfg.AutoUpdate)
 
 	go a.networkWorker(ctx)
+	go a.reporter.run(ctx)
 	if cfg.AutoUpdate {
 		go a.autoUpdateWorker(ctx)
 	} else {
@@ -161,14 +166,6 @@ func Run(configFile string, debug bool, version string) error {
 }
 
 func (a *Agent) loop(ctx context.Context) error {
-	active := time.Duration(a.cfg.ReportInterval) * time.Second
-	if a.cfg.CollectInterval > 0 {
-		active = time.Duration(a.cfg.CollectInterval) * time.Second
-	}
-	if active < time.Second {
-		active = time.Duration(defaultReportIntervalSec) * time.Second
-	}
-
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -178,17 +175,47 @@ func (a *Agent) loop(ctx context.Context) error {
 			return nil
 		case <-timer.C:
 			a.tick()
-			active = time.Duration(a.cfg.ReportInterval) * time.Second
-			if a.cfg.CollectInterval > 0 {
-				active = time.Duration(a.cfg.CollectInterval) * time.Second
-			}
-			timer.Reset(active)
+			timer.Reset(a.tickInterval())
 		}
 	}
 }
 
+func (a *Agent) tickInterval() time.Duration {
+	active := wssReportInterval(a.cfg.ReportInterval)
+	if a.cfg.CollectInterval > 0 {
+		collect := time.Duration(a.cfg.CollectInterval) * time.Second
+		if collect > 0 {
+			active = durationGCD(active, collect)
+		}
+	}
+	if active <= 0 {
+		return time.Second
+	}
+	return active
+}
+
 func (a *Agent) tick() {
 	now := time.Now()
+	reportInterval := time.Duration(a.cfg.ReportInterval) * time.Second
+	if reportInterval < time.Second {
+		reportInterval = time.Duration(defaultReportIntervalSec) * time.Second
+	}
+	wssConnected := a.reporter != nil && a.reporter.connected()
+	shouldWSSReport := wssConnected && (a.lastReport.IsZero() || now.Sub(a.lastReport) >= wssReportInterval(a.cfg.ReportInterval))
+	postDue := !wssConnected && (a.lastPost.IsZero() || now.Sub(a.lastPost) >= reportInterval)
+	postAllowed := a.reporter == nil || a.reporter.postFallbackAllowed()
+	if postDue && !postAllowed && a.reporter != nil {
+		a.reporter.logPostFallbackDelayed()
+	}
+	shouldPostReport := postDue && postAllowed
+	shouldSample := false
+	if a.cfg.CollectInterval > 0 {
+		collectInterval := time.Duration(a.cfg.CollectInterval) * time.Second
+		shouldSample = a.lastSample.IsZero() || now.Sub(a.lastSample) >= collectInterval
+	}
+	if !shouldWSSReport && !shouldPostReport && !shouldSample {
+		return
+	}
 	if now.Sub(a.basicAt) >= 60*time.Second || a.basicAt.IsZero() {
 		a.basic = collectBasicStats()
 		a.basicAt = now
@@ -217,23 +244,28 @@ func (a *Agent) tick() {
 	}
 
 	rxMonthly, txMonthly := calcMonthlyTraffic(a.paths.TrafficFile, netNow, a.cfg.ResetDay, a.cfg.Interface)
-	reportInterval := time.Duration(a.cfg.ReportInterval) * time.Second
-	shouldReport := a.lastReport.IsZero() || now.Sub(a.lastReport) >= reportInterval
 	diskIO := DiskIOStats{}
-	if shouldReport {
+	if shouldWSSReport || shouldPostReport {
 		diskIO = a.sampleDiskIO(now)
 	}
 	m := a.buildMetrics(cpu, netNow, rxSpeed, txSpeed, rxMonthly, txMonthly, diskIO)
-	if a.cfg.CollectInterval > 0 {
+	if shouldSample {
 		a.samples = append(a.samples, metricSample{
 			at:      now,
 			metrics: sampleMetricsToMap(m),
 		})
+		a.lastSample = now
 	}
-	if shouldReport {
-		a.report(m)
-		a.lastReport = now
-		a.samples = nil
+	if shouldWSSReport || shouldPostReport {
+		if a.sendReport(m, shouldWSSReport, shouldPostReport) {
+			if shouldWSSReport {
+				a.lastReport = now
+				a.lastPost = now
+			} else {
+				a.lastPost = now
+			}
+			a.samples = nil
+		}
 	}
 }
 
@@ -317,6 +349,44 @@ func probeLossValue(node string, r ProbeResult) any {
 
 func (a *Agent) report(m Metrics) {
 	reportAt := time.Now()
+	body, sampleCount, err := a.buildReportBody(m, reportAt)
+	if err != nil {
+		a.log.warnf("marshal payload failed: %v", err)
+		return
+	}
+	a.logMetricsSummary(m)
+	_, _ = a.postReportBody(body, sampleCount, false)
+}
+
+func (a *Agent) sendReport(m Metrics, preferWSS, allowPOST bool) bool {
+	reportAt := time.Now()
+	body, sampleCount, err := a.buildReportBody(m, reportAt)
+	if err != nil {
+		a.log.warnf("marshal payload failed: %v", err)
+		return false
+	}
+	a.logMetricsSummary(m)
+	if preferWSS && a.reporter != nil {
+		a.log.debugf("WSS report attempt url=%s payload_bytes=%d samples=%d", a.reporter.url(), len(body), sampleCount)
+		if a.reporter.send(body) {
+			return true
+		}
+	}
+	if !allowPOST {
+		return false
+	}
+	if a.reporter != nil && !a.reporter.postFallbackAllowed() {
+		a.reporter.logPostFallbackDelayed()
+		return false
+	}
+	statusCode, _ := a.postReportBody(body, sampleCount, true)
+	if isAuthConfigHTTPStatus(statusCode) && a.reporter != nil {
+		a.reporter.delayProtocol(fmt.Sprintf("POST fallback http=%d", statusCode))
+	}
+	return true
+}
+
+func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, error) {
 	payload := map[string]any{
 		"id":               a.cfg.ServerID,
 		"secret":           a.cfg.Secret,
@@ -330,16 +400,26 @@ func (a *Agent) report(m Metrics) {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		a.log.warnf("marshal payload failed: %v", err)
-		return
+		return nil, 0, err
 	}
+	return body, len(a.samples), nil
+}
+
+func (a *Agent) logMetricsSummary(m Metrics) {
 	gpuSummary, _ := json.Marshal(m.GPUInfo)
 	a.log.debugf("metrics summary cpu=%s gpu_info=%s", m.CPU, string(gpuSummary))
-	a.log.debugf("report attempt url=%s payload_bytes=%d samples=%d", a.cfg.WorkerURL, len(body), len(a.samples))
+}
+
+func (a *Agent) postReportBody(body []byte, sampleCount int, fallback bool) (int, error) {
+	label := "report"
+	if fallback {
+		label = "POST fallback"
+	}
+	a.log.debugf("%s attempt url=%s payload_bytes=%d samples=%d", label, a.cfg.WorkerURL, len(body), sampleCount)
 	req, err := http.NewRequest(http.MethodPost, a.cfg.WorkerURL, bytes.NewReader(body))
 	if err != nil {
-		a.log.warnf("create report request failed: %v", err)
-		return
+		a.log.warnf("create %s request failed: %v", label, err)
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	a.setAgentHeaders(req)
@@ -350,8 +430,8 @@ func (a *Agent) report(m Metrics) {
 	started := time.Now()
 	resp, err := sharedReportHTTPClient(8*time.Second, usePublicDNSResolver(a.cfg)).Do(req)
 	if err != nil {
-		a.log.warnf("report failed: %v", err)
-		return
+		a.log.warnf("%s failed: %v", label, err)
+		return 0, err
 	}
 	headerReceived := time.Now()
 	defer resp.Body.Close()
@@ -359,6 +439,7 @@ func (a *Agent) report(m Metrics) {
 	respHeaders := resp.Header
 	reportHTTPCode := resp.StatusCode
 	a.handleTimedReportResponse(reportHTTPCode, respBody, respHeaders, started, headerReceived)
+	return reportHTTPCode, nil
 }
 
 func (a *Agent) samplesForReport() []map[string]any {
@@ -591,7 +672,9 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 		a.prevDisk = DiskIOCounters{}
 		a.prevDiskAt = time.Time{}
 		a.samples = nil
+		a.lastSample = time.Time{}
 		a.lastReport = time.Time{}
+		a.lastPost = time.Time{}
 		a.log.info("dynamic configuration applied md5=%s interface=%s", newMD5, firstNonEmpty(iface, "auto"))
 	}
 	if hasCorrection {
