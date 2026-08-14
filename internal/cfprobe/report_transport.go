@@ -61,7 +61,8 @@ type wsServerFrame struct {
 	Error                string `json:"error"`
 	Code                 int    `json:"code"`
 	Body                 string `json:"body"`
-	Config               string `json:"config"`
+	ConfigBody           string `json:"config_body"`
+	Config               any    `json:"config"`
 	ConfigMD5            string `json:"config_md5"`
 	ConfigMD5Camel       string `json:"configMd5"`
 	MD5                  string `json:"md5"`
@@ -100,11 +101,31 @@ func reportWebSocketURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
+func reportWebSocketURLWithConfig(raw, schema, md5 string) (string, error) {
+	wsURL, err := reportWebSocketURL(raw)
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		return "", err
+	}
+	values := u.Query()
+	if strings.TrimSpace(schema) != "" {
+		values.Set("config_schema", strings.TrimSpace(schema))
+	}
+	if strings.TrimSpace(md5) != "" {
+		values.Set("config_md5", strings.TrimSpace(md5))
+	}
+	u.RawQuery = values.Encode()
+	return u.String(), nil
+}
+
 func wssReportInterval(reportIntervalSec int) time.Duration {
 	if reportIntervalSec < 1 {
 		reportIntervalSec = defaultReportIntervalSec
 	}
-	seconds := (reportIntervalSec + 19) / 20
+	seconds := (reportIntervalSec + 14) / 15
 	return time.Duration(seconds) * time.Second
 }
 
@@ -192,13 +213,18 @@ func (r *reportTransport) run(ctx context.Context) {
 }
 
 func (r *reportTransport) dial(ctx context.Context) (*webSocketConn, http.Header, time.Time, time.Time, error) {
+	configMD5 := firstNonEmpty(r.agent.cfg.ConfigMD5, "none")
+	wsURL, err := reportWebSocketURLWithConfig(r.wsURL, configSchemaVersion, configMD5)
+	if err != nil {
+		wsURL = r.wsURL
+	}
 	headers := http.Header{}
 	headers.Set("Accept", "*/*")
 	headers.Set("User-Agent", "cfsm")
 	headers.Set("X-Agent-Config-Schema", configSchemaVersion)
 	headers.Set("X-Agent-Version", r.agent.version)
-	headers.Set("X-Agent-Config-Md5", firstNonEmpty(r.agent.cfg.ConfigMD5, "none"))
-	return dialReportWebSocket(ctx, r.wsURL, headers, usePublicDNSResolver(r.agent.cfg), wssHandshakeTimeout)
+	headers.Set("X-Agent-Config-Md5", configMD5)
+	return dialReportWebSocket(ctx, wsURL, headers, usePublicDNSResolver(r.agent.cfg), wssHandshakeTimeout)
 }
 
 func (r *reportTransport) waitHello(conn *webSocketConn) (wsHelloFrame, error) {
@@ -314,7 +340,7 @@ func (r *reportTransport) reserveConfigApplySlot() bool {
 }
 
 func wssConfigBodyAndHeaders(frame wsServerFrame) ([]byte, http.Header, bool) {
-	body := firstNonEmpty(frame.Body, frame.Config)
+	body := firstNonEmpty(frame.Body, frame.ConfigBody, wssStringFromAny(frame.Config))
 	md5 := firstNonEmpty(frame.ConfigMD5, frame.ConfigMD5Camel, frame.MD5)
 	headers := http.Header{}
 	if h := stringMapFromAny(frame.Headers); len(h) > 0 {
@@ -328,6 +354,15 @@ func wssConfigBodyAndHeaders(frame wsServerFrame) ([]byte, http.Header, bool) {
 			body = payloadBody
 			md5 = firstNonEmpty(md5, payloadMD5)
 			for key, value := range payloadHeaders {
+				headers.Set(key, value)
+			}
+		}
+	}
+	if body == "" {
+		if configBody, configMD5, configHeaders := wssConfigPayload(frame.Config); configBody != "" {
+			body = configBody
+			md5 = firstNonEmpty(md5, configMD5)
+			for key, value := range configHeaders {
 				headers.Set(key, value)
 			}
 		}

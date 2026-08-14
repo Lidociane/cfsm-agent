@@ -28,9 +28,37 @@ func TestReportWebSocketURLConvertsHTTPUpdateURL(t *testing.T) {
 	}
 }
 
-func TestWSSReportIntervalRoundsUpReportIntervalByTwenty(t *testing.T) {
-	if got := wssReportInterval(60); got != 3*time.Second {
-		t.Fatalf("wssReportInterval(60) = %s, want 3s", got)
+func TestReportWebSocketURLWithConfigAddsQueryParameters(t *testing.T) {
+	got, err := reportWebSocketURLWithConfig(
+		"https://example.com/update?token=1",
+		configSchemaVersion,
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	)
+	if err != nil {
+		t.Fatalf("reportWebSocketURLWithConfig returned error: %v", err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("result is not a URL: %v", err)
+	}
+	if u.Scheme != "wss" {
+		t.Fatalf("scheme = %q, want wss", u.Scheme)
+	}
+	values := u.Query()
+	if values.Get("token") != "1" {
+		t.Fatalf("token query = %q, want 1", values.Get("token"))
+	}
+	if values.Get("config_schema") != configSchemaVersion {
+		t.Fatalf("config_schema = %q, want %q", values.Get("config_schema"), configSchemaVersion)
+	}
+	if values.Get("config_md5") != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("config_md5 = %q", values.Get("config_md5"))
+	}
+}
+
+func TestWSSReportIntervalRoundsUpReportIntervalByFifteen(t *testing.T) {
+	if got := wssReportInterval(60); got != 4*time.Second {
+		t.Fatalf("wssReportInterval(60) = %s, want 4s", got)
 	}
 	if got := wssReportInterval(30); got != 2*time.Second {
 		t.Fatalf("wssReportInterval(30) = %s, want 2s", got)
@@ -233,8 +261,8 @@ func TestReportTransportUsesServerSuggestedWSSReportInterval(t *testing.T) {
 	transport := &reportTransport{agent: &agent}
 	agent.reporter = transport
 
-	if got := agent.currentWSSReportInterval(); got != 3*time.Second {
-		t.Fatalf("currentWSSReportInterval before ack = %s, want 3s", got)
+	if got := agent.currentWSSReportInterval(); got != 4*time.Second {
+		t.Fatalf("currentWSSReportInterval before ack = %s, want 4s", got)
 	}
 
 	next := int64(60000)
@@ -254,8 +282,8 @@ func TestReportTransportUsesServerSuggestedWSSReportInterval(t *testing.T) {
 	}
 
 	transport.resetReportInterval()
-	if got := agent.currentWSSReportInterval(); got != 3*time.Second {
-		t.Fatalf("currentWSSReportInterval after reset = %s, want 3s", got)
+	if got := agent.currentWSSReportInterval(); got != 4*time.Second {
+		t.Fatalf("currentWSSReportInterval after reset = %s, want 4s", got)
 	}
 }
 
@@ -282,6 +310,48 @@ func TestWSSConfigBodySupportsPayloadObject(t *testing.T) {
 		t.Fatalf("report_interval = %q, want 60", values.Get("report_interval"))
 	}
 	if headers.Get("X-Agent-Config-Md5") != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("X-Agent-Config-Md5 = %q", headers.Get("X-Agent-Config-Md5"))
+	}
+}
+
+func TestWSSConfigBodySupportsConfigBodyAndConfigObject(t *testing.T) {
+	body, headers, ok := wssConfigBodyAndHeaders(wsServerFrame{
+		Type:       "ack",
+		ConfigBody: "collect_interval=0&report_interval=60&reset_day=1&schema_version=3&interface=",
+		ConfigMD5:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	})
+	if !ok {
+		t.Fatal("config_body frame returned ok=false")
+	}
+	if string(body) != "collect_interval=0&report_interval=60&reset_day=1&schema_version=3&interface=" {
+		t.Fatalf("body = %q", string(body))
+	}
+	if headers.Get("X-Agent-Config-Md5") != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("X-Agent-Config-Md5 = %q", headers.Get("X-Agent-Config-Md5"))
+	}
+
+	body, headers, ok = wssConfigBodyAndHeaders(wsServerFrame{
+		Type: "ack",
+		Config: map[string]any{
+			"collect_interval": float64(0),
+			"report_interval":  float64(120),
+			"reset_day":        float64(1),
+			"schema_version":   configSchemaVersion,
+			"interface":        "",
+			"config_md5":       "cccccccccccccccccccccccccccccccc",
+		},
+	})
+	if !ok {
+		t.Fatal("config object frame returned ok=false")
+	}
+	values, err := url.ParseQuery(string(body))
+	if err != nil {
+		t.Fatalf("config object body is not query string: %v", err)
+	}
+	if values.Get("report_interval") != "120" {
+		t.Fatalf("report_interval = %q, want 120", values.Get("report_interval"))
+	}
+	if headers.Get("X-Agent-Config-Md5") != "cccccccccccccccccccccccccccccccc" {
 		t.Fatalf("X-Agent-Config-Md5 = %q", headers.Get("X-Agent-Config-Md5"))
 	}
 }
