@@ -206,12 +206,12 @@ WSS 建连成功后，Agent 会等待服务端 hello：
 
 第一条有效 WSS 上报发送的就是旧 POST body，不改变 payload 结构；后续同一连接内也继续发送相同结构。旧版接收端仍可按 `REPORT_INTERVAL` 接收 `POST` fallback，`Content-Type` 为 `application/json`。为了兼容旧版接收端，`metrics` 内大多数基础指标仍以字符串上报；新增的 `disk` 磁盘 IO 对象使用数值类型。
 
-WSS 可用时，Agent 按 `REPORT_INTERVAL / 20` 并向上取整到秒发送实时上报，例如 `REPORT_INTERVAL=60` 时约每 3 秒发送一次，`REPORT_INTERVAL=30` 时约每 2 秒发送一次；Agent 不根据服务端 D1 写入节流丢弃实时样本，持久化频率由服务端按 `server.report_interval` 控制。WSS 高频发送只刷新 CPU、内存、网卡累计流量和网速这些轻量实时字段；磁盘容量、磁盘 IO、GPU、进程数、连接数、月流量文件统计等完整指标仍按 `REPORT_INTERVAL` 或原有探测周期刷新，并在 WSS 实时包中复用最近一次缓存值。WSS 不可用时才 fallback 到 POST。普通 WSS 网络错误使用指数退避重连，最小 60 秒、最大 5 分钟；认证或配置类错误（HTTP `401`/`403`/`404`、WebSocket close code `1008`、服务端 `error` 帧）会同时暂停 WSS 和 POST fallback 120 秒，避免持续消耗服务端额度。相关日志会明确使用 `WSS connected`、`WSS ack`、`WSS error`、`WSS retry delayed`、`POST fallback delayed` 等关键字区分状态。
+WSS 可用时，Agent 默认按 `REPORT_INTERVAL / 20` 并向上取整到秒发送实时上报，例如 `REPORT_INTERVAL=60` 时约每 3 秒发送一次，`REPORT_INTERVAL=30` 时约每 2 秒发送一次；服务端 ack 可通过 `nextWssReportAfterMs` 动态调整下一次 WSS 上报间隔，有前端实时订阅或资源告警缓存活跃时保持实时频率，无实时消费者时回退到 `REPORT_INTERVAL` 以降低 idle 状态 Durable Objects WebSocket 消息数。Agent 不根据服务端 D1 写入节流丢弃实时样本，持久化频率由服务端按 `server.report_interval` 控制。WSS 高频发送只刷新 CPU、内存、网卡累计流量和网速这些轻量实时字段；磁盘容量、磁盘 IO、GPU、进程数、连接数、月流量文件统计等完整指标仍按 `REPORT_INTERVAL` 或原有探测周期刷新，并在 WSS 实时包中复用最近一次缓存值。WSS 不可用时才 fallback 到 POST。普通 WSS 网络错误使用指数退避重连，最小 60 秒、最大 5 分钟；认证或配置类错误（HTTP `401`/`403`/`404`、WebSocket close code `1008`、服务端 `error` 帧）会同时暂停 WSS 和 POST fallback 120 秒，避免持续消耗服务端额度。相关日志会明确使用 `WSS connected`、`WSS ack`、`WSS error`、`WSS retry delayed`、`POST fallback delayed` 等关键字区分状态。
 
 服务端 ack 示例：
 
 ```json
-{ "type": "ack", "ts": 1720000000000, "persisted": false, "nextD1WriteAfterMs": 30000 }
+{ "type": "ack", "ts": 1720000000000, "persisted": false, "nextD1WriteAfterMs": 30000, "nextWssReportAfterMs": 60000 }
 ```
 
 收到 ack 后 Agent 继续下一轮采集/发送；`persisted=false` 表示服务端未执行持久化写入，Agent 不会因此重试。服务端 error 示例：
@@ -341,6 +341,8 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 | `samples` | array | 可选，仅 `COLLECT_INTERVAL > 0` 时存在 |
 | `collect_interval` | number | 高频采样间隔，单位秒；`0` 表示不启用高频采样 |
 | `report_interval` | number | 上报间隔，单位秒 |
+| `config_schema` | string | 动态配置协议版本，当前为 `3`；WSS 首次上报、约每 60 秒或 MD5 变化时携带 |
+| `config_md5` | string | 本地保存的远端配置 MD5；首次或为空时为 `none`，携带频率同 `config_schema` |
 
 `time` 字段：
 

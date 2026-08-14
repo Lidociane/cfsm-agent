@@ -39,12 +39,14 @@ type Agent struct {
 	monthlyTX  uint64
 	clock      calibratedClock
 
-	samples    []metricSample
-	lastSample time.Time
-	lastReport time.Time
-	lastPost   time.Time
-	updateMu   sync.Mutex
-	reporter   *reportTransport
+	samples                  []metricSample
+	lastSample               time.Time
+	lastReport               time.Time
+	lastPost                 time.Time
+	lastConfigStateReportAt  time.Time
+	lastConfigStateReportMD5 string
+	updateMu                 sync.Mutex
+	reporter                 *reportTransport
 }
 
 const (
@@ -52,6 +54,7 @@ const (
 	metricsProbeMedianWindow      = time.Minute
 	metricsProbeWindowSampleCount = 6
 	metricsProbeSampleCount       = 1
+	configStateReportInterval     = time.Minute
 )
 
 type timedProbeResult struct {
@@ -185,7 +188,7 @@ func (a *Agent) loop(ctx context.Context) error {
 }
 
 func (a *Agent) tickInterval() time.Duration {
-	active := wssReportInterval(a.cfg.ReportInterval)
+	active := a.currentWSSReportInterval()
 	if a.cfg.CollectInterval > 0 {
 		collect := time.Duration(a.cfg.CollectInterval) * time.Second
 		if collect > 0 {
@@ -198,6 +201,14 @@ func (a *Agent) tickInterval() time.Duration {
 	return active
 }
 
+func (a *Agent) currentWSSReportInterval() time.Duration {
+	fallback := wssReportInterval(a.cfg.ReportInterval)
+	if a.reporter != nil {
+		return a.reporter.reportInterval(fallback)
+	}
+	return fallback
+}
+
 func (a *Agent) tick() {
 	now := time.Now()
 	reportInterval := time.Duration(a.cfg.ReportInterval) * time.Second
@@ -205,7 +216,7 @@ func (a *Agent) tick() {
 		reportInterval = time.Duration(defaultReportIntervalSec) * time.Second
 	}
 	wssConnected := a.reporter != nil && a.reporter.connected()
-	shouldWSSReport := wssConnected && (a.lastReport.IsZero() || now.Sub(a.lastReport) >= wssReportInterval(a.cfg.ReportInterval))
+	shouldWSSReport := wssConnected && (a.lastReport.IsZero() || now.Sub(a.lastReport) >= a.currentWSSReportInterval())
 	postDue := !wssConnected && (a.lastPost.IsZero() || now.Sub(a.lastPost) >= reportInterval)
 	postAllowed := a.reporter == nil || a.reporter.postFallbackAllowed()
 	if postDue && !postAllowed && a.reporter != nil {
@@ -414,6 +425,10 @@ func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, err
 		"collect_interval": a.cfg.CollectInterval,
 		"report_interval":  a.cfg.ReportInterval,
 	}
+	if a.shouldReportConfigState(reportAt) {
+		payload["config_schema"] = configSchemaVersion
+		payload["config_md5"] = firstNonEmpty(a.cfg.ConfigMD5, "none")
+	}
 	if a.cfg.CollectInterval > 0 {
 		payload["samples"] = a.samplesForReport()
 	}
@@ -422,6 +437,18 @@ func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, err
 		return nil, 0, err
 	}
 	return body, len(a.samples), nil
+}
+
+func (a *Agent) shouldReportConfigState(reportAt time.Time) bool {
+	configMD5 := firstNonEmpty(a.cfg.ConfigMD5, "none")
+	if a.lastConfigStateReportAt.IsZero() ||
+		configMD5 != a.lastConfigStateReportMD5 ||
+		reportAt.Sub(a.lastConfigStateReportAt) >= configStateReportInterval {
+		a.lastConfigStateReportAt = reportAt
+		a.lastConfigStateReportMD5 = configMD5
+		return true
+	}
+	return false
 }
 
 func (a *Agent) logMetricsSummary(m Metrics) {
@@ -713,6 +740,11 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		a.lastSample = time.Time{}
 		a.lastReport = time.Time{}
 		a.lastPost = time.Time{}
+		a.lastConfigStateReportAt = time.Time{}
+		a.lastConfigStateReportMD5 = ""
+		if a.reporter != nil {
+			a.reporter.resetReportInterval()
+		}
 		a.log.info("dynamic configuration applied md5=%s interface=%s", firstNonEmpty(a.cfg.ConfigMD5, "none"), firstNonEmpty(iface, "auto"))
 	}
 	if hasCorrection {

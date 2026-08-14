@@ -48,10 +48,12 @@ func TestBuildReportBodyKeepsLegacyPOSTShape(t *testing.T) {
 			WorkerURL:      "https://worker.example.com/update",
 			ReportInterval: 60,
 			ResetDay:       1,
+			ConfigMD5:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
 		log: newLogger(false),
 	}
-	body, _, err := agent.buildReportBody(Metrics{CPU: "1.23", BootTime: "0"}, time.Now())
+	reportAt := time.Now()
+	body, _, err := agent.buildReportBody(Metrics{CPU: "1.23", BootTime: "0"}, reportAt)
 	if err != nil {
 		t.Fatalf("buildReportBody returned error: %v", err)
 	}
@@ -64,6 +66,58 @@ func TestBuildReportBodyKeepsLegacyPOSTShape(t *testing.T) {
 			t.Fatalf("payload missing legacy key %q: %s", key, body)
 		}
 	}
+	var configSchema string
+	if err := json.Unmarshal(payload["config_schema"], &configSchema); err != nil {
+		t.Fatalf("config_schema is not a string: %v", err)
+	}
+	if configSchema != configSchemaVersion {
+		t.Fatalf("config_schema = %q, want %q", configSchema, configSchemaVersion)
+	}
+	var configMD5 string
+	if err := json.Unmarshal(payload["config_md5"], &configMD5); err != nil {
+		t.Fatalf("config_md5 is not a string: %v", err)
+	}
+	if configMD5 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("config_md5 = %q", configMD5)
+	}
+	body, _, err = agent.buildReportBody(Metrics{CPU: "1.23", BootTime: "0"}, reportAt.Add(10*time.Second))
+	if err != nil {
+		t.Fatalf("second buildReportBody returned error: %v", err)
+	}
+	var secondPayload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &secondPayload); err != nil {
+		t.Fatalf("second payload is not JSON: %v", err)
+	}
+	if _, ok := secondPayload["config_schema"]; ok {
+		t.Fatalf("config_schema should be omitted before config report interval: %s", body)
+	}
+	if _, ok := secondPayload["config_md5"]; ok {
+		t.Fatalf("config_md5 should be omitted before config report interval: %s", body)
+	}
+	body, _, err = agent.buildReportBody(Metrics{CPU: "1.23", BootTime: "0"}, reportAt.Add(configStateReportInterval))
+	if err != nil {
+		t.Fatalf("third buildReportBody returned error: %v", err)
+	}
+	var thirdPayload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &thirdPayload); err != nil {
+		t.Fatalf("third payload is not JSON: %v", err)
+	}
+	if _, ok := thirdPayload["config_schema"]; !ok {
+		t.Fatalf("config_schema missing after config report interval: %s", body)
+	}
+	agent.cfg.ConfigMD5 = "cccccccccccccccccccccccccccccccc"
+	body, _, err = agent.buildReportBody(Metrics{CPU: "1.23", BootTime: "0"}, reportAt.Add(configStateReportInterval+10*time.Second))
+	if err != nil {
+		t.Fatalf("fourth buildReportBody returned error: %v", err)
+	}
+	var fourthPayload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fourthPayload); err != nil {
+		t.Fatalf("fourth payload is not JSON: %v", err)
+	}
+	if _, ok := fourthPayload["config_md5"]; !ok {
+		t.Fatalf("config_md5 missing after local md5 changed: %s", body)
+	}
+
 	if _, ok := payload["type"]; ok {
 		t.Fatalf("payload unexpectedly uses wrapper type field: %s", body)
 	}
@@ -168,6 +222,40 @@ func TestReportTransportProtocolDelayPausesPostFallback(t *testing.T) {
 	}
 	if delay < 119*time.Second {
 		t.Fatalf("pause delay = %s, want at least 119s", delay)
+	}
+}
+
+func TestReportTransportUsesServerSuggestedWSSReportInterval(t *testing.T) {
+	agent := Agent{
+		cfg: Config{ReportInterval: 60},
+		log: newLogger(false),
+	}
+	transport := &reportTransport{agent: &agent}
+	agent.reporter = transport
+
+	if got := agent.currentWSSReportInterval(); got != 3*time.Second {
+		t.Fatalf("currentWSSReportInterval before ack = %s, want 3s", got)
+	}
+
+	next := int64(60000)
+	transport.setNextReportAfterMs(next)
+	if got := agent.currentWSSReportInterval(); got != time.Minute {
+		t.Fatalf("currentWSSReportInterval after ack = %s, want 1m", got)
+	}
+
+	transport.setNextReportAfterMs(1)
+	if got := agent.currentWSSReportInterval(); got != time.Second {
+		t.Fatalf("currentWSSReportInterval after small ack = %s, want 1s", got)
+	}
+
+	transport.setNextReportAfterMs(int64((10 * time.Minute) / time.Millisecond))
+	if got := agent.currentWSSReportInterval(); got != wssDynamicMaxInterval {
+		t.Fatalf("currentWSSReportInterval after large ack = %s, want %s", got, wssDynamicMaxInterval)
+	}
+
+	transport.resetReportInterval()
+	if got := agent.currentWSSReportInterval(); got != 3*time.Second {
+		t.Fatalf("currentWSSReportInterval after reset = %s, want 3s", got)
 	}
 }
 

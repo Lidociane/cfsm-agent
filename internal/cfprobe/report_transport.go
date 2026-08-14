@@ -21,6 +21,8 @@ const (
 	wssHelloTimeout       = 10 * time.Second
 	wssWriteTimeout       = 8 * time.Second
 	wssConfigMinInterval  = time.Minute
+	wssDynamicMinInterval = time.Second
+	wssDynamicMaxInterval = 5 * time.Minute
 )
 
 type reportTransport struct {
@@ -33,6 +35,7 @@ type reportTransport struct {
 	pauseReason      string
 	lastPostDelayLog time.Time
 	lastConfigAt     time.Time
+	nextReportAfter  time.Duration
 }
 
 type wsProtocolDelayError struct {
@@ -50,19 +53,20 @@ type wsHelloFrame struct {
 }
 
 type wsServerFrame struct {
-	Type               string `json:"type"`
-	TS                 int64  `json:"ts"`
-	Persisted          *bool  `json:"persisted"`
-	NextD1WriteAfterMs *int64 `json:"nextD1WriteAfterMs"`
-	Error              string `json:"error"`
-	Code               int    `json:"code"`
-	Body               string `json:"body"`
-	Config             string `json:"config"`
-	ConfigMD5          string `json:"config_md5"`
-	ConfigMD5Camel     string `json:"configMd5"`
-	MD5                string `json:"md5"`
-	Payload            any    `json:"payload"`
-	Headers            any    `json:"headers"`
+	Type                 string `json:"type"`
+	TS                   int64  `json:"ts"`
+	Persisted            *bool  `json:"persisted"`
+	NextD1WriteAfterMs   *int64 `json:"nextD1WriteAfterMs"`
+	NextWSSReportAfterMs *int64 `json:"nextWssReportAfterMs"`
+	Error                string `json:"error"`
+	Code                 int    `json:"code"`
+	Body                 string `json:"body"`
+	Config               string `json:"config"`
+	ConfigMD5            string `json:"config_md5"`
+	ConfigMD5Camel       string `json:"configMd5"`
+	MD5                  string `json:"md5"`
+	Payload              any    `json:"payload"`
+	Headers              any    `json:"headers"`
 }
 
 func newReportTransport(a *Agent) *reportTransport {
@@ -102,6 +106,43 @@ func wssReportInterval(reportIntervalSec int) time.Duration {
 	}
 	seconds := (reportIntervalSec + 19) / 20
 	return time.Duration(seconds) * time.Second
+}
+
+func (r *reportTransport) reportInterval(fallback time.Duration) time.Duration {
+	if r == nil {
+		return fallback
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.nextReportAfter > 0 {
+		return r.nextReportAfter
+	}
+	return fallback
+}
+
+func (r *reportTransport) setNextReportAfterMs(ms int64) {
+	if r == nil || ms <= 0 {
+		return
+	}
+	next := time.Duration(ms) * time.Millisecond
+	if next < wssDynamicMinInterval {
+		next = wssDynamicMinInterval
+	}
+	if next > wssDynamicMaxInterval {
+		next = wssDynamicMaxInterval
+	}
+	r.mu.Lock()
+	r.nextReportAfter = next
+	r.mu.Unlock()
+}
+
+func (r *reportTransport) resetReportInterval() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.nextReportAfter = 0
+	r.mu.Unlock()
 }
 
 func (r *reportTransport) run(ctx context.Context) {
@@ -216,7 +257,12 @@ func (r *reportTransport) readLoop(ctx context.Context, conn *webSocketConn) err
 			if frame.NextD1WriteAfterMs != nil {
 				nextD1 = *frame.NextD1WriteAfterMs
 			}
-			r.agent.log.debugf("WSS ack ts=%d persisted=%v nextD1WriteAfterMs=%d", frame.TS, persisted, nextD1)
+			nextWSS := int64(0)
+			if frame.NextWSSReportAfterMs != nil {
+				nextWSS = *frame.NextWSSReportAfterMs
+				r.setNextReportAfterMs(nextWSS)
+			}
+			r.agent.log.debugf("WSS ack ts=%d persisted=%v nextD1WriteAfterMs=%d nextWssReportAfterMs=%d", frame.TS, persisted, nextD1, nextWSS)
 			if body, headers, ok := wssConfigBodyAndHeaders(frame); ok {
 				r.applyConfigBody(body, headers)
 			}

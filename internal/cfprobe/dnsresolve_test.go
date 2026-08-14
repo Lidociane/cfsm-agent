@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -80,7 +81,7 @@ func TestDownloadToFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat() error = %v", err)
 	}
-	if info.Mode().Perm() != 0o755 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
 		t.Fatalf("mode = %o, want 755", info.Mode().Perm())
 	}
 }
