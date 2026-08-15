@@ -7,8 +7,10 @@ const (
 	legacyAgentVersion       = "1.0.0"
 	maxTrafficCorrectionGB   = 1000000
 	autoUpdateDelay          = 60 * time.Second
-	configSchemaVersion      = "3"
+	configSchemaVersion      = "4"
 	defaultReportIntervalSec = 60
+	connectionModeAuto       = "auto"
+	connectionModeHTTP       = "http"
 )
 
 type Config struct {
@@ -23,6 +25,7 @@ type Config struct {
 	BDNode          string
 	Interface       string
 	ResetDay        int
+	ConnectionMode  string
 	AutoUpdate      bool
 	UpdateProxy     string
 	// ConfigMD5 mirrors the worker dynamic config version; local fields like

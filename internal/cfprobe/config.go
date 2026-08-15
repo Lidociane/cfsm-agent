@@ -20,6 +20,7 @@ func defaultConfig() Config {
 		CollectInterval: 0,
 		ReportInterval:  defaultReportIntervalSec,
 		ResetDay:        1,
+		ConnectionMode:  connectionModeAuto,
 		ConfigMD5:       "none",
 	}
 }
@@ -36,6 +37,18 @@ func normalizeBinaryValue(raw string, def bool) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("仅支持 0 或 1")
+	}
+}
+
+func normalizeConnectionMode(raw string) (string, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	switch raw {
+	case "", connectionModeAuto, "wss", "websocket":
+		return connectionModeAuto, nil
+	case connectionModeHTTP, "post":
+		return connectionModeHTTP, nil
+	default:
+		return "", fmt.Errorf("connection_mode 仅支持 auto 或 http")
 	}
 }
 
@@ -107,6 +120,7 @@ func readConfig(path string) (Config, error) {
 	cfg.BDNode = values["BD_NODE"]
 	cfg.Interface, _ = normalizeInterfaceList(values["INTERFACE"])
 	cfg.ResetDay = parseIntDefault(values["RESET_DAY"], cfg.ResetDay)
+	cfg.ConnectionMode, _ = normalizeConnectionMode(values["CONNECTION_MODE"])
 	cfg.AutoUpdate = values["AUTO_UPDATE"] == "1"
 	cfg.UpdateProxy = strings.TrimSpace(values["UPDATE_PROXY"])
 	cfg.ConfigMD5 = values["CONFIG_MD5"]
@@ -137,6 +151,7 @@ func writeConfig(path string, cfg Config) error {
 	writeKV("BD_NODE", cfg.BDNode)
 	writeKV("INTERFACE", cfg.Interface)
 	writeKV("RESET_DAY", strconv.Itoa(cfg.ResetDay))
+	writeKV("CONNECTION_MODE", cfg.ConnectionMode)
 	if cfg.AutoUpdate {
 		writeKV("AUTO_UPDATE", "1")
 	} else {
@@ -170,6 +185,11 @@ func normalizeConfigIntervals(cfg *Config) {
 	}
 	if cfg.ConfigMD5 == "" {
 		cfg.ConfigMD5 = "none"
+	}
+	if mode, err := normalizeConnectionMode(cfg.ConnectionMode); err == nil {
+		cfg.ConnectionMode = mode
+	} else {
+		cfg.ConnectionMode = connectionModeAuto
 	}
 	cfg.UpdateProxy = strings.TrimSpace(cfg.UpdateProxy)
 }

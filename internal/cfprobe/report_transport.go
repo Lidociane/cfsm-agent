@@ -36,6 +36,8 @@ type reportTransport struct {
 	lastPostDelayLog time.Time
 	lastConfigAt     time.Time
 	nextReportAfter  time.Duration
+	running          bool
+	stopped          bool
 }
 
 type wsProtocolDelayError struct {
@@ -166,13 +168,69 @@ func (r *reportTransport) resetReportInterval() {
 	r.mu.Unlock()
 }
 
+func (r *reportTransport) start(ctx context.Context) bool {
+	if r == nil || r.wsURL == "" {
+		return false
+	}
+	r.mu.Lock()
+	if r.running {
+		r.stopped = false
+		r.mu.Unlock()
+		return false
+	}
+	r.running = true
+	r.stopped = false
+	r.mu.Unlock()
+	go r.run(ctx)
+	return true
+}
+
+func (r *reportTransport) stop(reason string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.stopped = true
+	r.pauseUntil = time.Time{}
+	r.pauseReason = ""
+	conn := r.conn
+	r.conn = nil
+	r.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if reason != "" {
+		r.agent.log.info("WSS stopped reason=%s", reason)
+	}
+}
+
+func (r *reportTransport) isStopped() bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopped
+}
+
 func (r *reportTransport) run(ctx context.Context) {
 	if r == nil || r.wsURL == "" {
 		return
 	}
+	defer func() {
+		r.mu.Lock()
+		r.running = false
+		r.mu.Unlock()
+	}()
 	backoff := wssNetworkMinRetry
 	for {
+		if r.isStopped() || !r.agent.usesWSS() {
+			return
+		}
 		if !r.waitProtocolPause(ctx) {
+			return
+		}
+		if r.isStopped() || !r.agent.usesWSS() {
 			return
 		}
 		conn, headers, started, received, err := r.dial(ctx)
@@ -390,7 +448,7 @@ func wssConfigPayload(payload any) (string, string, map[string]string) {
 		}
 		values := url.Values{}
 		for _, key := range []string{
-			"collect_interval", "report_interval", "reset_day", "schema_version", "interface",
+			"collect_interval", "report_interval", "reset_day", "schema_version", "interface", "connection_mode",
 			"custom_ct", "custom_cu", "custom_cm", "custom_bd",
 			"rx_correction", "tx_correction", "update",
 		} {
@@ -565,6 +623,9 @@ func (r *reportTransport) handleConnectionError(ctx context.Context, err error, 
 		return !isContextDone(ctx)
 	}
 	if isContextDone(ctx) {
+		return false
+	}
+	if r.isStopped() || !r.agent.usesWSS() {
 		return false
 	}
 	var delayErr *wsProtocolDelayError

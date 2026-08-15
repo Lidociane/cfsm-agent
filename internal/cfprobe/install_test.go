@@ -14,11 +14,13 @@ func TestMergeExplicitInstallConfig(t *testing.T) {
 		WorkerURL:      "https://worker.example.com/report",
 		ReportInterval: 120,
 		ResetDay:       5,
+		ConnectionMode: connectionModeAuto,
 		AutoUpdate:     false,
 	}
 	flagConfig := Config{
 		ReportInterval: defaultReportIntervalSec,
 		ResetDay:       1,
+		ConnectionMode: connectionModeHTTP,
 		AutoUpdate:     true,
 		UpdateProxy:    "https://gh-proxy.example.com",
 	}
@@ -33,6 +35,15 @@ func TestMergeExplicitInstallConfig(t *testing.T) {
 	}
 	if merged.UpdateProxy != "" {
 		t.Fatalf("UpdateProxy = %q, want preserved empty", merged.UpdateProxy)
+	}
+	if merged.ConnectionMode != connectionModeAuto {
+		t.Fatalf("ConnectionMode = %q, want preserved %q", merged.ConnectionMode, connectionModeAuto)
+	}
+
+	merged = existing
+	mergeExplicitInstallConfig(&merged, flagConfig, map[string]bool{"connection_mode": true})
+	if merged.ConnectionMode != connectionModeHTTP {
+		t.Fatalf("ConnectionMode = %q, want %q", merged.ConnectionMode, connectionModeHTTP)
 	}
 
 	merged = existing

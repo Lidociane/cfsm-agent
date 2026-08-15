@@ -24,6 +24,7 @@ type Agent struct {
 	paths   Paths
 	log     logger
 	version string
+	ctx     context.Context
 
 	mu         sync.RWMutex
 	probes     ProbeSnapshot
@@ -151,6 +152,7 @@ func Run(configFile string, debug bool, version string) error {
 		paths:    paths,
 		log:      newLogger(debug),
 		version:  version,
+		ctx:      ctx,
 		prevNet:  readNetBytes(cfg.Interface),
 		prevTime: time.Now(),
 	}
@@ -159,11 +161,15 @@ func Run(configFile string, debug bool, version string) error {
 	a.basicAt = time.Now()
 
 	a.log.info("CF-Server-Monitor Go Probe started version=%s platform=%s config=%s", version, platformName(), paths.ConfigFile)
-	a.log.debugf("config id=%s url=%s report_interval=%ds collect_interval=%ds reset_day=%d interface=%s auto_update=%v",
-		cfg.ServerID, cfg.WorkerURL, cfg.ReportInterval, cfg.CollectInterval, cfg.ResetDay, firstNonEmpty(cfg.Interface, "auto"), cfg.AutoUpdate)
+	a.log.debugf("config id=%s url=%s report_interval=%ds collect_interval=%ds reset_day=%d connection_mode=%s interface=%s auto_update=%v",
+		cfg.ServerID, cfg.WorkerURL, cfg.ReportInterval, cfg.CollectInterval, cfg.ResetDay, cfg.ConnectionMode, firstNonEmpty(cfg.Interface, "auto"), cfg.AutoUpdate)
 
 	go a.networkWorker(ctx)
-	go a.reporter.run(ctx)
+	if a.usesWSS() {
+		a.reporter.start(ctx)
+	} else {
+		a.log.info("WSS disabled connection_mode=http")
+	}
 	if cfg.AutoUpdate {
 		go a.autoUpdateWorker(ctx)
 	} else {
@@ -202,11 +208,23 @@ func (a *Agent) tickInterval() time.Duration {
 }
 
 func (a *Agent) currentWSSReportInterval() time.Duration {
-	fallback := wssReportInterval(a.cfg.ReportInterval)
-	if a.reporter != nil {
+	if a.reporter != nil && a.usesWSS() {
+		fallback := wssReportInterval(a.cfg.ReportInterval)
 		return a.reporter.reportInterval(fallback)
 	}
-	return fallback
+	reportInterval := time.Duration(a.cfg.ReportInterval) * time.Second
+	if reportInterval < time.Second {
+		return time.Duration(defaultReportIntervalSec) * time.Second
+	}
+	return reportInterval
+}
+
+func (a *Agent) usesWSS() bool {
+	mode, err := normalizeConnectionMode(a.cfg.ConnectionMode)
+	if err != nil {
+		mode = connectionModeAuto
+	}
+	return mode != connectionModeHTTP
 }
 
 func (a *Agent) tick() {
@@ -215,11 +233,12 @@ func (a *Agent) tick() {
 	if reportInterval < time.Second {
 		reportInterval = time.Duration(defaultReportIntervalSec) * time.Second
 	}
-	wssConnected := a.reporter != nil && a.reporter.connected()
+	wssEnabled := a.usesWSS()
+	wssConnected := wssEnabled && a.reporter != nil && a.reporter.connected()
 	shouldWSSReport := wssConnected && (a.lastReport.IsZero() || now.Sub(a.lastReport) >= a.currentWSSReportInterval())
 	postDue := !wssConnected && (a.lastPost.IsZero() || now.Sub(a.lastPost) >= reportInterval)
-	postAllowed := a.reporter == nil || a.reporter.postFallbackAllowed()
-	if postDue && !postAllowed && a.reporter != nil {
+	postAllowed := !wssEnabled || a.reporter == nil || a.reporter.postFallbackAllowed()
+	if postDue && !postAllowed && wssEnabled && a.reporter != nil {
 		a.reporter.logPostFallbackDelayed()
 	}
 	shouldPostReport := postDue && postAllowed
@@ -405,11 +424,11 @@ func (a *Agent) sendReport(m Metrics, preferWSS, allowPOST bool) bool {
 	if !allowPOST {
 		return false
 	}
-	if a.reporter != nil && !a.reporter.postFallbackAllowed() {
+	if preferWSS && a.reporter != nil && !a.reporter.postFallbackAllowed() {
 		a.reporter.logPostFallbackDelayed()
 		return false
 	}
-	statusCode, _ := a.postReportBody(body, sampleCount, true)
+	statusCode, _ := a.postReportBody(body, sampleCount, preferWSS)
 	if isAuthConfigHTTPStatus(statusCode) && a.reporter != nil {
 		a.reporter.delayProtocol(fmt.Sprintf("POST fallback http=%d", statusCode))
 	}
@@ -649,6 +668,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		"custom_cm":        true,
 		"custom_bd":        true,
 		"interface":        true,
+		"connection_mode":  true,
 		"rx_correction":    true,
 		"tx_correction":    true,
 		"update":           true,
@@ -662,7 +682,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if update != "" && update != "0" && update != "1" {
 		return fmt.Errorf("invalid update %s", update)
 	}
-	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface")
+	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface") || values.Has("connection_mode")
 	hasCorrection := values.Has("rx_correction") || values.Has("tx_correction")
 	if !hasConfig {
 		if hasCorrection {
@@ -706,11 +726,15 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if err != nil {
 		return err
 	}
+	connectionMode, err := normalizeConnectionMode(values.Get("connection_mode"))
+	if err != nil {
+		return err
+	}
 	shouldApply := false
 	if hasRemoteMD5 {
 		shouldApply = newMD5 != a.cfg.ConfigMD5
 	} else {
-		shouldApply = a.remoteConfigDiffers(values, collect, report, reset, iface)
+		shouldApply = a.remoteConfigDiffers(values, collect, report, reset, iface, connectionMode)
 	}
 	if shouldApply {
 		a.cfg.CollectInterval = collect
@@ -721,6 +745,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		a.cfg.CMNode = values.Get("custom_cm")
 		a.cfg.BDNode = values.Get("custom_bd")
 		a.cfg.Interface = iface
+		a.cfg.ConnectionMode = connectionMode
 		if hasRemoteMD5 {
 			a.cfg.ConfigMD5 = newMD5
 		}
@@ -745,7 +770,8 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		if a.reporter != nil {
 			a.reporter.resetReportInterval()
 		}
-		a.log.info("dynamic configuration applied md5=%s interface=%s", firstNonEmpty(a.cfg.ConfigMD5, "none"), firstNonEmpty(iface, "auto"))
+		a.syncReportTransport()
+		a.log.info("dynamic configuration applied md5=%s connection_mode=%s interface=%s", firstNonEmpty(a.cfg.ConfigMD5, "none"), a.cfg.ConnectionMode, firstNonEmpty(iface, "auto"))
 	}
 	if hasCorrection {
 		rx := values.Get("rx_correction")
@@ -764,7 +790,23 @@ func validConfigMD5(value string) bool {
 	})
 }
 
-func (a *Agent) remoteConfigDiffers(values url.Values, collect, report, reset int, iface string) bool {
+func (a *Agent) syncReportTransport() {
+	if a.usesWSS() {
+		if a.ctx == nil {
+			return
+		}
+		if a.reporter == nil {
+			a.reporter = newReportTransport(a)
+		}
+		a.reporter.start(a.ctx)
+		return
+	}
+	if a.reporter != nil {
+		a.reporter.stop("connection_mode=http")
+	}
+}
+
+func (a *Agent) remoteConfigDiffers(values url.Values, collect, report, reset int, iface, connectionMode string) bool {
 	return a.cfg.CollectInterval != collect ||
 		a.cfg.ReportInterval != report ||
 		a.cfg.ResetDay != reset ||
@@ -772,7 +814,8 @@ func (a *Agent) remoteConfigDiffers(values url.Values, collect, report, reset in
 		a.cfg.CUNode != values.Get("custom_cu") ||
 		a.cfg.CMNode != values.Get("custom_cm") ||
 		a.cfg.BDNode != values.Get("custom_bd") ||
-		a.cfg.Interface != iface
+		a.cfg.Interface != iface ||
+		a.cfg.ConnectionMode != connectionMode
 }
 
 func inIntSet(v int, allowed ...int) bool {

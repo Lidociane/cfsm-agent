@@ -118,6 +118,8 @@ func mergeExplicitInstallConfig(dst *Config, src Config, explicit map[string]boo
 			dst.Interface = src.Interface
 		case "reset_day":
 			dst.ResetDay = src.ResetDay
+		case "connection_mode":
+			dst.ConnectionMode = src.ConnectionMode
 		case "auto_update":
 			dst.AutoUpdate = src.AutoUpdate
 		case "install_ghproxy":
@@ -261,6 +263,7 @@ func printInstallSummary(paths Paths, opts InstallOptions) {
 	fmt.Printf("  Worker URL  : %s\n", opts.WorkerURL)
 	fmt.Printf("  Report      : %d秒\n", opts.ReportInterval)
 	fmt.Printf("  Collect     : %d秒\n", opts.CollectInterval)
+	fmt.Printf("  Connection  : %s\n", opts.ConnectionMode)
 	fmt.Printf("  Auto Update : %v\n", opts.AutoUpdate)
 	fmt.Printf("  Debug       : %v\n", opts.Debug)
 	fmt.Printf("  Interface   : %s\n", firstNonEmpty(opts.Interface, "自动汇总"))

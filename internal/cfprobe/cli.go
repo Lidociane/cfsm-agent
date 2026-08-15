@@ -68,6 +68,8 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	fs.StringVar(&opts.Interface, "interfaces", "", "")
 	fs.StringVar(&opts.Interface, "iface", "", "")
 	fs.IntVar(&opts.ResetDay, "reset_day", 1, "")
+	fs.StringVar(&opts.ConnectionMode, "connection_mode", connectionModeAuto, "")
+	fs.StringVar(&opts.ConnectionMode, "connection-mode", connectionModeAuto, "")
 	fs.StringVar(&autoUpdate, "auto_update", "", "")
 	fs.StringVar(&autoUpdate, "auto-update", "", "")
 	fs.StringVar(&opts.RXCorrectionGB, "rx_correction", "", "")
@@ -99,6 +101,10 @@ func parseInstallOptions(args []string) (InstallOptions, error) {
 	if err != nil {
 		return opts, err
 	}
+	opts.ConnectionMode, err = normalizeConnectionMode(opts.ConnectionMode)
+	if err != nil {
+		return opts, err
+	}
 	normalizeConfigIntervals(&opts.Config)
 	return opts, nil
 }
@@ -110,6 +116,8 @@ func canonicalInstallFlag(name string) string {
 		return "collect_interval"
 	case "interfaces", "iface":
 		return "interface"
+	case "connection-mode":
+		return "connection_mode"
 	default:
 		return name
 	}
@@ -153,6 +161,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  -ct/-cu/-cm/-bd=HOST 自定义测试节点，可写 host 或 host:port")
 	fmt.Fprintln(w, "  -interface=IFACES    指定网卡，多个用英文逗号分隔")
 	fmt.Fprintln(w, "  -reset_day=N         流量重置日(1-31, 0=不重置)，默认1")
+	fmt.Fprintln(w, "  -connection_mode=MODE 连接模式 auto|http，默认auto")
 	fmt.Fprintln(w, "  -auto_update=0|1     开启自动检查更新，默认0")
 	fmt.Fprintln(w, "  -rx_correction=N     下行流量校正(GB)")
 	fmt.Fprintln(w, "  -tx_correction=N     上行流量校正(GB)")
