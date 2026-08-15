@@ -48,6 +48,7 @@ type Agent struct {
 	lastConfigStateReportMD5 string
 	updateMu                 sync.Mutex
 	reporter                 *reportTransport
+	wake                     chan struct{}
 }
 
 const (
@@ -155,6 +156,7 @@ func Run(configFile string, debug bool, version string) error {
 		ctx:      ctx,
 		prevNet:  readNetBytes(cfg.Interface),
 		prevTime: time.Now(),
+		wake:     make(chan struct{}, 1),
 	}
 	a.reporter = newReportTransport(a)
 	a.basic = collectBasicStats()
@@ -188,8 +190,34 @@ func (a *Agent) loop(ctx context.Context) error {
 			return nil
 		case <-timer.C:
 			a.tick()
-			timer.Reset(a.tickInterval())
+			resetTimer(timer, a.tickInterval())
+		case <-a.wake:
+			a.tick()
+			resetTimer(timer, a.tickInterval())
 		}
+	}
+}
+
+func resetTimer(timer *time.Timer, d time.Duration) {
+	if d <= 0 {
+		d = time.Second
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
+}
+
+func (a *Agent) wakeTick() {
+	if a == nil || a.wake == nil {
+		return
+	}
+	select {
+	case a.wake <- struct{}{}:
+	default:
 	}
 }
 
@@ -771,6 +799,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 			a.reporter.resetReportInterval()
 		}
 		a.syncReportTransport()
+		a.wakeTick()
 		a.log.info("dynamic configuration applied md5=%s connection_mode=%s interface=%s", firstNonEmpty(a.cfg.ConfigMD5, "none"), a.cfg.ConnectionMode, firstNonEmpty(iface, "auto"))
 	}
 	if hasCorrection {

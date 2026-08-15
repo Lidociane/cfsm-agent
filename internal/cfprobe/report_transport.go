@@ -155,8 +155,12 @@ func (r *reportTransport) setNextReportAfterMs(ms int64) {
 		next = wssDynamicMaxInterval
 	}
 	r.mu.Lock()
+	previous := r.nextReportAfter
 	r.nextReportAfter = next
 	r.mu.Unlock()
+	if r.agent != nil && (previous == 0 || next < previous) {
+		r.agent.wakeTick()
+	}
 }
 
 func (r *reportTransport) resetReportInterval() {

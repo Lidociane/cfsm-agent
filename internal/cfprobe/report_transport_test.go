@@ -287,6 +287,29 @@ func TestReportTransportUsesServerSuggestedWSSReportInterval(t *testing.T) {
 	}
 }
 
+func TestReportTransportSuggestedIntervalWakesAgentLoop(t *testing.T) {
+	agent := Agent{
+		cfg:  Config{ReportInterval: 60},
+		log:  newLogger(false),
+		wake: make(chan struct{}, 1),
+	}
+	transport := &reportTransport{agent: &agent}
+
+	transport.setNextReportAfterMs(int64((60 * time.Second) / time.Millisecond))
+	select {
+	case <-agent.wake:
+	default:
+		t.Fatal("setNextReportAfterMs did not wake agent loop")
+	}
+
+	transport.setNextReportAfterMs(int64((2 * time.Second) / time.Millisecond))
+	select {
+	case <-agent.wake:
+	default:
+		t.Fatal("shorter setNextReportAfterMs did not wake agent loop")
+	}
+}
+
 func TestHTTPConnectionModeUsesReportInterval(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
@@ -387,6 +410,7 @@ func TestReportTransportWSSConfigAppliesRemoteConfig(t *testing.T) {
 		},
 		paths: Paths{ConfigFile: configFile, TrafficFile: tmp + "/traffic.dat"},
 		log:   newLogger(false),
+		wake:  make(chan struct{}, 1),
 	}
 	transport := reportTransport{agent: &agent}
 	transport.handleConfigFrame(wsServerFrame{
@@ -400,6 +424,11 @@ func TestReportTransportWSSConfigAppliesRemoteConfig(t *testing.T) {
 	}
 	if agent.cfg.ConfigMD5 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		t.Fatalf("ConfigMD5 = %q", agent.cfg.ConfigMD5)
+	}
+	select {
+	case <-agent.wake:
+	default:
+		t.Fatal("WSS config apply did not wake agent loop")
 	}
 }
 
