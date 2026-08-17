@@ -3,6 +3,7 @@
 package cfprobe
 
 import (
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +12,23 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
+	"unicode/utf16"
+
+	xwindows "golang.org/x/sys/windows"
 )
+
+const (
+	windowsTaskNamespace = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+	windowsTaskAuthorID  = "Author"
+)
+
+const windowsResumeEventSubscription = `<QueryList>
+  <Query Id="0" Path="System">
+    <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]</Select>
+    <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=107]]</Select>
+  </Query>
+</QueryList>`
 
 func defaultPaths() Paths {
 	serviceName := serviceNameDefault
@@ -114,6 +131,43 @@ func startDetached(binary string, args []string, logFile, pidFile string) error 
 
 func stopDetached(pidFile string) {
 	_ = os.Remove(pidFile)
+}
+
+func stopWindowsScheduledTask(paths Paths) {
+	_ = runCommand("schtasks", "/End", "/TN", paths.ServiceName)
+	stopWindowsProbeProcesses(paths)
+	waitWindowsProbeProcessesStopped(paths, 5*time.Second)
+}
+
+func stopWindowsProbeProcesses(paths Paths) {
+	_ = runCommandQuiet("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+		windowsProbeProcessScript(paths, "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"))
+}
+
+func waitWindowsProbeProcessesStopped(paths Paths, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !windowsProbeProcessesRunning(paths) || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func windowsProbeProcessesRunning(paths Paths) bool {
+	return commandOutput("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+		windowsProbeProcessScript(paths, "Select-Object -First 1 -ExpandProperty ProcessId")) != ""
+}
+
+func windowsProbeProcessScript(paths Paths, pipeline string) string {
+	return strings.Join([]string{
+		"$ErrorActionPreference='SilentlyContinue'",
+		"$me=$PID",
+		"$bin=" + quotePowerShellLiteral(paths.BinaryFile),
+		"$wrapper=" + quotePowerShellLiteral(windowsTaskWrapperFile(paths)),
+		"$procs=Get-CimInstance Win32_Process | Where-Object { $cmd=[string]$_.CommandLine; $_.ProcessId -ne $me -and $cmd -and ((($cmd.IndexOf($bin, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and $cmd.ToLowerInvariant().Contains(' run ')) -or ($cmd.IndexOf($wrapper, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) }",
+		"$procs | " + pipeline,
+	}, "; ")
 }
 
 func deepUninstall(paths Paths) []string {
@@ -237,10 +291,191 @@ func windowsServiceArgs(paths Paths, debug bool) []string {
 	return []string{"cmd.exe", "/D", "/C", quoteWindowsCmdArg(windowsTaskWrapperFile(paths))}
 }
 
-func writeWindowsTaskWrapper(paths Paths, debug bool) error {
-	if err := ensureLogFile(paths.LogFile); err != nil {
-		return err
+type windowsTaskDefinition struct {
+	XMLName          xml.Name                    `xml:"Task"`
+	XMLNS            string                      `xml:"xmlns,attr"`
+	Version          string                      `xml:"version,attr"`
+	RegistrationInfo windowsTaskRegistrationInfo `xml:"RegistrationInfo"`
+	Triggers         windowsTaskTriggers         `xml:"Triggers"`
+	Principals       windowsTaskPrincipals       `xml:"Principals"`
+	Settings         windowsTaskSettings         `xml:"Settings"`
+	Actions          windowsTaskActions          `xml:"Actions"`
+}
+
+type windowsTaskRegistrationInfo struct {
+	Description string `xml:"Description"`
+}
+
+type windowsTaskTriggers struct {
+	BootTrigger  windowsTaskEnabledTrigger `xml:"BootTrigger"`
+	LogonTrigger windowsTaskEnabledTrigger `xml:"LogonTrigger"`
+	EventTrigger windowsTaskEventTrigger   `xml:"EventTrigger"`
+}
+
+type windowsTaskEnabledTrigger struct {
+	Enabled bool `xml:"Enabled"`
+}
+
+type windowsTaskEventTrigger struct {
+	Enabled      bool   `xml:"Enabled"`
+	Subscription string `xml:"Subscription"`
+	Delay        string `xml:"Delay"`
+}
+
+type windowsTaskPrincipals struct {
+	Principal windowsTaskPrincipal `xml:"Principal"`
+}
+
+type windowsTaskPrincipal struct {
+	ID       string `xml:"id,attr"`
+	UserID   string `xml:"UserId"`
+	RunLevel string `xml:"RunLevel"`
+}
+
+type windowsTaskSettings struct {
+	MultipleInstancesPolicy    string                  `xml:"MultipleInstancesPolicy"`
+	DisallowStartIfOnBatteries bool                    `xml:"DisallowStartIfOnBatteries"`
+	StopIfGoingOnBatteries     bool                    `xml:"StopIfGoingOnBatteries"`
+	AllowHardTerminate         bool                    `xml:"AllowHardTerminate"`
+	StartWhenAvailable         bool                    `xml:"StartWhenAvailable"`
+	RunOnlyIfNetworkAvailable  bool                    `xml:"RunOnlyIfNetworkAvailable"`
+	IdleSettings               windowsTaskIdleSettings `xml:"IdleSettings"`
+	AllowStartOnDemand         bool                    `xml:"AllowStartOnDemand"`
+	Enabled                    bool                    `xml:"Enabled"`
+	Hidden                     bool                    `xml:"Hidden"`
+	RunOnlyIfIdle              bool                    `xml:"RunOnlyIfIdle"`
+	WakeToRun                  bool                    `xml:"WakeToRun"`
+	ExecutionTimeLimit         string                  `xml:"ExecutionTimeLimit"`
+	Priority                   int                     `xml:"Priority"`
+	RestartOnFailure           windowsTaskRestart      `xml:"RestartOnFailure"`
+}
+
+type windowsTaskIdleSettings struct {
+	StopOnIdleEnd bool `xml:"StopOnIdleEnd"`
+	RestartOnIdle bool `xml:"RestartOnIdle"`
+}
+
+type windowsTaskRestart struct {
+	Interval string `xml:"Interval"`
+	Count    int    `xml:"Count"`
+}
+
+type windowsTaskActions struct {
+	Context string          `xml:"Context,attr"`
+	Exec    windowsTaskExec `xml:"Exec"`
+}
+
+type windowsTaskExec struct {
+	Command   string `xml:"Command"`
+	Arguments string `xml:"Arguments"`
+}
+
+func windowsScheduledTaskXML(paths Paths, debug bool) (string, error) {
+	command, arguments := windowsScheduledTaskAction(paths, debug)
+	task := windowsTaskDefinition{
+		XMLNS:   windowsTaskNamespace,
+		Version: "1.4",
+		RegistrationInfo: windowsTaskRegistrationInfo{
+			Description: "CF Server Monitor Probe Agent",
+		},
+		Triggers: windowsTaskTriggers{
+			BootTrigger:  windowsTaskEnabledTrigger{Enabled: true},
+			LogonTrigger: windowsTaskEnabledTrigger{Enabled: true},
+			EventTrigger: windowsTaskEventTrigger{
+				Enabled:      true,
+				Subscription: windowsResumeEventSubscription,
+				Delay:        "PT10S",
+			},
+		},
+		Principals: windowsTaskPrincipals{
+			Principal: windowsTaskPrincipal{
+				ID:       windowsTaskAuthorID,
+				UserID:   "S-1-5-18",
+				RunLevel: "HighestAvailable",
+			},
+		},
+		Settings: windowsTaskSettings{
+			MultipleInstancesPolicy:    "IgnoreNew",
+			DisallowStartIfOnBatteries: false,
+			StopIfGoingOnBatteries:     false,
+			AllowHardTerminate:         true,
+			StartWhenAvailable:         true,
+			RunOnlyIfNetworkAvailable:  false,
+			IdleSettings: windowsTaskIdleSettings{
+				StopOnIdleEnd: false,
+				RestartOnIdle: false,
+			},
+			AllowStartOnDemand: true,
+			Enabled:            true,
+			Hidden:             false,
+			RunOnlyIfIdle:      false,
+			WakeToRun:          false,
+			ExecutionTimeLimit: "PT0S",
+			Priority:           7,
+			RestartOnFailure: windowsTaskRestart{
+				Interval: "PT1M",
+				Count:    3,
+			},
+		},
+		Actions: windowsTaskActions{
+			Context: windowsTaskAuthorID,
+			Exec: windowsTaskExec{
+				Command:   command,
+				Arguments: arguments,
+			},
+		},
 	}
+	data, err := xml.MarshalIndent(task, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" + string(data) + "\r\n", nil
+}
+
+func windowsScheduledTaskAction(paths Paths, debug bool) (string, string) {
+	args := windowsServiceArgs(paths, debug)
+	if len(args) == 0 {
+		return "", ""
+	}
+	return args[0], strings.Join(args[1:], " ")
+}
+
+func writeWindowsScheduledTaskXML(paths Paths, debug bool) (string, func(), error) {
+	content, err := windowsScheduledTaskXML(paths, debug)
+	if err != nil {
+		return "", func() {}, err
+	}
+	tmp, err := os.CreateTemp("", paths.ServiceName+"-task-*.xml")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() {
+		_ = os.Remove(tmp.Name())
+	}
+	if _, err := tmp.Write(utf16LEWithBOM(content)); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return tmp.Name(), cleanup, nil
+}
+
+func utf16LEWithBOM(s string) []byte {
+	encoded := utf16.Encode([]rune(s))
+	out := make([]byte, 2, 2+len(encoded)*2)
+	out[0] = 0xff
+	out[1] = 0xfe
+	for _, r := range encoded {
+		out = append(out, byte(r), byte(r>>8))
+	}
+	return out
+}
+
+func writeWindowsTaskWrapper(paths Paths, debug bool) error {
 	debugArg := "-debug=0"
 	if debug {
 		debugArg = "-debug=1"
@@ -263,6 +498,27 @@ func windowsTaskWrapperFile(paths Paths) string {
 
 func quoteWindowsCmdArg(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+func ensurePlatformLogFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		if fileExists(path) && isWindowsFileInUse(err) {
+			return nil
+		}
+		return err
+	}
+	return f.Close()
+}
+
+func isWindowsFileInUse(err error) bool {
+	return errors.Is(err, xwindows.ERROR_SHARING_VIOLATION) || errors.Is(err, xwindows.ERROR_LOCK_VIOLATION)
 }
 
 func chmodExecutable(_ string) error {

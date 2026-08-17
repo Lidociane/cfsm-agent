@@ -222,7 +222,7 @@ func prepareManagementLogFile(paths Paths) error {
 	if logFile == "" {
 		return nil
 	}
-	return ensureLogFile(logFile)
+	return ensurePlatformLogFile(logFile)
 }
 
 func managementLogFile(paths Paths, system string) string {
@@ -406,7 +406,7 @@ func stopService(paths Paths) {
 	case "synology-rc":
 		_ = runCommand(synologyServiceFile(paths), "stop")
 	case "windows":
-		_ = runCommand("schtasks", "/End", "/TN", paths.ServiceName)
+		stopWindowsScheduledTask(paths)
 	default:
 		stopDetached(paths.PIDFile)
 	}
@@ -636,8 +636,12 @@ func writeWindowsService(paths Paths, debug bool) error {
 		return err
 	}
 	_ = runCommand("schtasks", "/Delete", "/TN", paths.ServiceName, "/F")
-	taskRun := strings.Join(windowsServiceArgs(paths, debug), " ")
-	if err := runCommand("schtasks", "/Create", "/TN", paths.ServiceName, "/SC", "ONSTART", "/TR", taskRun, "/RL", "HIGHEST", "/RU", "SYSTEM", "/F"); err != nil {
+	taskXML, cleanup, err := writeWindowsScheduledTaskXML(paths, debug)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errWindowsService, err)
+	}
+	defer cleanup()
+	if err := runCommand("schtasks", "/Create", "/TN", paths.ServiceName, "/XML", taskXML, "/RU", "SYSTEM", "/F"); err != nil {
 		return fmt.Errorf("%w: %v", errWindowsService, err)
 	}
 	return nil

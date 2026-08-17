@@ -873,6 +873,17 @@ func writeWindowsTaskWrapper(_ Paths, _ bool) error {
 
 var errWindowsService = errors.New("Windows 服务管理仅在 Windows 平台可用")
 
+func writeWindowsScheduledTaskXML(_ Paths, _ bool) (string, func(), error) {
+	return "", func() {}, errWindowsService
+}
+
+func stopWindowsScheduledTask(_ Paths) {
+}
+
+func ensurePlatformLogFile(path string) error {
+	return ensureLogFile(path)
+}
+
 func chmodExecutable(path string) error {
 	return os.Chmod(path, 0o755)
 }
