@@ -68,6 +68,51 @@ func TestWSSReportIntervalRoundsUpReportIntervalByFifteen(t *testing.T) {
 	}
 }
 
+func TestWSSConnectedEffectiveCollectIntervalTracksWSSReportInterval(t *testing.T) {
+	agent := Agent{
+		cfg: Config{
+			ReportInterval:  30,
+			CollectInterval: 0,
+		},
+	}
+	agent.reporter = &reportTransport{agent: &agent, conn: &webSocketConn{}}
+	if got := agent.effectiveCollectInterval(true); got != 2*time.Second {
+		t.Fatalf("effectiveCollectInterval collect=0 = %s, want 2s", got)
+	}
+	if got := agent.tickInterval(); got != 2*time.Second {
+		t.Fatalf("tickInterval collect=0 = %s, want 2s", got)
+	}
+
+	agent.cfg.CollectInterval = 10
+	if got := agent.effectiveCollectInterval(true); got != 2*time.Second {
+		t.Fatalf("effectiveCollectInterval collect=10 = %s, want 2s", got)
+	}
+
+	agent.cfg.CollectInterval = 1
+	if got := agent.effectiveCollectInterval(true); got != time.Second {
+		t.Fatalf("effectiveCollectInterval collect=1 = %s, want 1s", got)
+	}
+	if got := agent.tickInterval(); got != time.Second {
+		t.Fatalf("tickInterval collect=1 = %s, want 1s", got)
+	}
+}
+
+func TestHTTPCollectIntervalZeroDoesNotEnableSamples(t *testing.T) {
+	agent := Agent{
+		cfg: Config{
+			ReportInterval:  30,
+			CollectInterval: 0,
+			ConnectionMode:  connectionModeHTTP,
+		},
+	}
+	if got := agent.effectiveCollectInterval(false); got != 0 {
+		t.Fatalf("effectiveCollectInterval http collect=0 = %s, want 0", got)
+	}
+	if got := agent.tickInterval(); got != 30*time.Second {
+		t.Fatalf("tickInterval http collect=0 = %s, want 30s", got)
+	}
+}
+
 func TestBuildReportBodyKeepsLegacyPOSTShape(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
@@ -93,6 +138,9 @@ func TestBuildReportBodyKeepsLegacyPOSTShape(t *testing.T) {
 		if _, ok := payload[key]; !ok {
 			t.Fatalf("payload missing legacy key %q: %s", key, body)
 		}
+	}
+	if _, ok := payload["samples"]; ok {
+		t.Fatalf("payload unexpectedly includes samples without buffered samples: %s", body)
 	}
 	var configSchema string
 	if err := json.Unmarshal(payload["config_schema"], &configSchema); err != nil {
@@ -151,6 +199,51 @@ func TestBuildReportBodyKeepsLegacyPOSTShape(t *testing.T) {
 	}
 	if _, ok := payload["payload"]; ok {
 		t.Fatalf("payload unexpectedly uses wrapper payload field: %s", body)
+	}
+}
+
+func TestBuildReportBodyIncludesBufferedSamplesWhenCollectIntervalZero(t *testing.T) {
+	reportAt := time.Now()
+	agent := Agent{
+		cfg: Config{
+			ServerID:        "sid",
+			Secret:          "secret",
+			WorkerURL:       "https://worker.example.com/update",
+			ReportInterval:  30,
+			CollectInterval: 0,
+			ResetDay:        1,
+			ConfigMD5:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		log: newLogger(false),
+		samples: []metricSample{{
+			at:      reportAt,
+			metrics: map[string]any{"cpu": "1.23"},
+		}},
+	}
+	body, sampleCount, err := agent.buildReportBody(Metrics{CPU: "1.23", BootTime: "0"}, reportAt)
+	if err != nil {
+		t.Fatalf("buildReportBody returned error: %v", err)
+	}
+	if sampleCount != 1 {
+		t.Fatalf("sampleCount = %d, want 1", sampleCount)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("payload is not JSON: %v", err)
+	}
+	var collectInterval int
+	if err := json.Unmarshal(payload["collect_interval"], &collectInterval); err != nil {
+		t.Fatalf("collect_interval is not a number: %v", err)
+	}
+	if collectInterval != 0 {
+		t.Fatalf("collect_interval = %d, want 0", collectInterval)
+	}
+	var samples []map[string]any
+	if err := json.Unmarshal(payload["samples"], &samples); err != nil {
+		t.Fatalf("samples is not an array: %v", err)
+	}
+	if len(samples) != 1 {
+		t.Fatalf("samples length = %d, want 1", len(samples))
 	}
 }
 

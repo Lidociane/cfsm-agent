@@ -223,16 +223,31 @@ func (a *Agent) wakeTick() {
 
 func (a *Agent) tickInterval() time.Duration {
 	active := a.currentWSSReportInterval()
-	if a.cfg.CollectInterval > 0 {
-		collect := time.Duration(a.cfg.CollectInterval) * time.Second
-		if collect > 0 {
-			active = durationGCD(active, collect)
-		}
+	if collect := a.effectiveCollectInterval(a.reporter != nil && a.reporter.connected()); collect > 0 {
+		active = durationGCD(active, collect)
 	}
 	if active <= 0 {
 		return time.Second
 	}
 	return active
+}
+
+func (a *Agent) effectiveCollectInterval(wssConnected bool) time.Duration {
+	collect := time.Duration(a.cfg.CollectInterval) * time.Second
+	if collect < 0 {
+		collect = 0
+	}
+	if !wssConnected {
+		return collect
+	}
+	wssInterval := a.currentWSSReportInterval()
+	if wssInterval <= 0 {
+		return collect
+	}
+	if collect <= 0 || collect > wssInterval {
+		return wssInterval
+	}
+	return collect
 }
 
 func (a *Agent) currentWSSReportInterval() time.Duration {
@@ -271,8 +286,7 @@ func (a *Agent) tick() {
 	}
 	shouldPostReport := postDue && postAllowed
 	shouldSample := false
-	if a.cfg.CollectInterval > 0 {
-		collectInterval := time.Duration(a.cfg.CollectInterval) * time.Second
+	if collectInterval := a.effectiveCollectInterval(wssConnected); collectInterval > 0 {
 		shouldSample = a.lastSample.IsZero() || now.Sub(a.lastSample) >= collectInterval
 	}
 	if !shouldWSSReport && !shouldPostReport && !shouldSample {
@@ -476,7 +490,7 @@ func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, err
 		payload["config_schema"] = configSchemaVersion
 		payload["config_md5"] = firstNonEmpty(a.cfg.ConfigMD5, "none")
 	}
-	if a.cfg.CollectInterval > 0 {
+	if len(a.samples) > 0 {
 		payload["samples"] = a.samplesForReport()
 	}
 	body, err := json.Marshal(payload)
