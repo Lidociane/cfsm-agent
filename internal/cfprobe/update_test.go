@@ -149,7 +149,7 @@ func TestRemoteConfigMD5UsesHeaderAndPreservesUpdateProxy(t *testing.T) {
 		log:   newLogger(false),
 	}
 	headers := http.Header{"X-Agent-Config-Md5": []string{newMD5}}
-	body := []byte("collect_interval=0&report_interval=60&reset_day=1&schema_version=4&interface=&connection_mode=auto")
+	body := []byte("collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto")
 
 	if err := a.applyRemoteConfig(body, headers); err != nil {
 		t.Fatalf("applyRemoteConfig() error = %v", err)

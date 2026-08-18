@@ -85,7 +85,7 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 | `-secret=SECRET` | 服务器密钥，首次安装必填 | 无 |
 | `-url=WORKER_URL` | Worker 上报地址，首次安装必填 | 无 |
 | `-interval=N` | 上报间隔，单位秒 | `60` |
-| `-collect_interval=N` | 采样间隔，单位秒；为 `0` 时按上报间隔采样 | `0` |
+| `-collect_interval=N` | 采样间隔，单位秒；WSS auto 开启时为 `0` 或大于 `WSS_REPORT_INTERVAL` 会按 `WSS_REPORT_INTERVAL` 采样 | `0` |
 | `-ct=HOST` | 电信测试节点，可写 `host` 或 `host:port` | 空 |
 | `-cu=HOST` | 联通测试节点，可写 `host` 或 `host:port` | 空 |
 | `-cm=HOST` | 移动测试节点，可写 `host` 或 `host:port` | 空 |
@@ -207,7 +207,7 @@ WSS 建连成功后，Agent 会等待服务端 hello：
 
 第一条有效 WSS 上报发送的就是旧 POST body，不改变 payload 结构；后续同一连接内也继续发送相同结构。旧版接收端仍可按 `REPORT_INTERVAL` 接收 `POST` fallback，`Content-Type` 为 `application/json`。为了兼容旧版接收端，`metrics` 内大多数基础指标仍以字符串上报；新增的 `disk` 磁盘 IO 对象使用数值类型。
 
-WSS 可用且 `CONNECTION_MODE=auto` 时，Agent 默认按 `REPORT_INTERVAL / 15` 并向上取整到秒发送实时上报，例如 `REPORT_INTERVAL=60` 时约每 4 秒发送一次，`REPORT_INTERVAL=30` 时约每 2 秒发送一次；服务端 ack 可通过 `nextWssReportAfterMs` 动态调整下一次 WSS 上报间隔，有前端实时订阅或资源告警缓存活跃时保持实时频率，无实时消费者时回退到 `REPORT_INTERVAL` 以降低 idle 状态 Durable Objects WebSocket 消息数。`CONNECTION_MODE=http` 时不启动 WSS，只按 `REPORT_INTERVAL` 走 `POST /update`。服务端 `/update` WSS 使用 Durable Object 标准 WebSocket API 接收 Agent 上报，让高频业务帧按 WebSocket incoming messages 口径计量；代价是 Agent 长连接存在时 DO 会保持非休眠状态并产生 duration（GB-s）。Agent 不根据服务端 D1 写入节流丢弃实时样本，持久化频率由服务端按 `server.report_interval` 控制。WSS 高频发送只刷新 CPU、内存、网卡累计流量和网速这些轻量实时字段；磁盘容量、磁盘 IO、GPU、进程数、连接数、月流量文件统计等完整指标仍按 `REPORT_INTERVAL` 或原有探测周期刷新，并在 WSS 实时包中复用最近一次缓存值。WSS 不可用时才 fallback 到 POST。普通 WSS 网络错误使用指数退避重连，最小 60 秒、最大 5 分钟；认证或配置类错误（HTTP `401`/`403`/`404`、WebSocket close code `1008`、服务端 `error` 帧）会同时暂停 WSS 和 POST fallback 120 秒，避免持续消耗服务端额度。相关日志会明确使用 `WSS connected`、`WSS ack`、`WSS error`、`WSS retry delayed`、`POST fallback delayed` 等关键字区分状态。
+WSS 可用且 `CONNECTION_MODE=auto` 时，Agent 使用服务端配置的 `WSS_REPORT_INTERVAL` 发送实时上报，默认 2 秒，可配置为 1-5 秒；当 `COLLECT_INTERVAL=0` 或大于该值时，实际采样间隔同步使用 `WSS_REPORT_INTERVAL`。服务端 ack 可通过 `nextWssReportAfterMs` 动态调整下一次 WSS 上报间隔，前端有实时订阅时使用该配置值；无前端访问时改用 `REPORT_INTERVAL`，但最低为 60 秒。`CONNECTION_MODE=http` 时不启动 WSS，只按 `REPORT_INTERVAL` 走 `POST /update`。服务端 `/update` WSS 使用 Durable Object 标准 WebSocket API 接收 Agent 上报，让高频业务帧按 WebSocket incoming messages 口径计量；代价是 Agent 长连接存在时 DO 会保持非休眠状态并产生 duration（GB-s）。Agent 不根据服务端 D1 写入节流丢弃实时样本，持久化频率由服务端按 `server.report_interval` 控制。WSS 高频发送只刷新 CPU、内存、网卡累计流量和网速这些轻量实时字段；磁盘容量、磁盘 IO、GPU、进程数、连接数、月流量文件统计等完整指标仍按 `REPORT_INTERVAL` 或原有探测周期刷新，并在 WSS 实时包中复用最近一次缓存值。WSS 不可用时才 fallback 到 POST。普通 WSS 网络错误使用指数退避重连，最小 60 秒、最大 5 分钟；认证或配置类错误（HTTP `401`/`403`/`404`、WebSocket close code `1008`、服务端 `error` 帧）会同时暂停 WSS 和 POST fallback 120 秒，避免持续消耗服务端额度。相关日志会明确使用 `WSS connected`、`WSS ack`、`WSS error`、`WSS retry delayed`、`POST fallback delayed` 等关键字区分状态。
 
 服务端 ack 示例：
 
@@ -228,7 +228,7 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 ```json
 {
   "type": "config",
-  "body": "collect_interval=0&report_interval=60&reset_day=1&schema_version=4&interface=&connection_mode=auto"
+  "body": "collect_interval=2&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto&wss_report_interval=2"
 }
 ```
 
@@ -238,12 +238,13 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 {
   "type": "config",
   "payload": {
-    "collect_interval": 0,
+    "collect_interval": 2,
     "report_interval": 60,
     "reset_day": 1,
-    "schema_version": 4,
+    "schema_version": 5,
     "interface": "",
-    "connection_mode": "auto"
+    "connection_mode": "auto",
+    "wss_report_interval": 2
   }
 }
 ```

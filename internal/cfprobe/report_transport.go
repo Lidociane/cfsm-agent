@@ -123,14 +123,6 @@ func reportWebSocketURLWithConfig(raw, schema, md5 string) (string, error) {
 	return u.String(), nil
 }
 
-func wssReportInterval(reportIntervalSec int) time.Duration {
-	if reportIntervalSec < 1 {
-		reportIntervalSec = defaultReportIntervalSec
-	}
-	seconds := (reportIntervalSec + 14) / 15
-	return time.Duration(seconds) * time.Second
-}
-
 func (r *reportTransport) reportInterval(fallback time.Duration) time.Duration {
 	if r == nil {
 		return fallback
@@ -452,7 +444,7 @@ func wssConfigPayload(payload any) (string, string, map[string]string) {
 		}
 		values := url.Values{}
 		for _, key := range []string{
-			"collect_interval", "report_interval", "reset_day", "schema_version", "interface", "connection_mode",
+			"collect_interval", "report_interval", "wss_report_interval", "reset_day", "schema_version", "interface", "connection_mode",
 			"custom_ct", "custom_cu", "custom_cm", "custom_bd",
 			"rx_correction", "tx_correction", "update",
 		} {

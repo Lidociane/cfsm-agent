@@ -251,7 +251,7 @@ func TestDateHeaderCoexistsWithURLConfigResponse(t *testing.T) {
 		responseDateHeader:   []string{"Thu, 13 Aug 2026 00:23:22 GMT"},
 		"X-Agent-Config-Md5": []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
 	}
-	body := []byte("collect_interval=0&report_interval=60&reset_day=1&schema_version=4&interface=&connection_mode=auto")
+	body := []byte("collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto")
 	started := time.Now()
 	agent.handleTimedReportResponse(http.StatusOK, body, headers, started, started.Add(20*time.Millisecond))
 

@@ -3,14 +3,17 @@ package cfprobe
 import "time"
 
 const (
-	serviceNameDefault       = "cf-probe"
-	legacyAgentVersion       = "1.0.0"
-	maxTrafficCorrectionGB   = 1000000
-	autoUpdateDelay          = 60 * time.Second
-	configSchemaVersion      = "4"
-	defaultReportIntervalSec = 60
-	connectionModeAuto       = "auto"
-	connectionModeHTTP       = "http"
+	serviceNameDefault          = "cf-probe"
+	legacyAgentVersion          = "1.0.0"
+	maxTrafficCorrectionGB      = 1000000
+	autoUpdateDelay             = 60 * time.Second
+	configSchemaVersion         = "5"
+	defaultReportIntervalSec    = 60
+	defaultWSSReportIntervalSec = 2
+	minWSSReportIntervalSec     = 1
+	maxWSSReportIntervalSec     = 5
+	connectionModeAuto          = "auto"
+	connectionModeHTTP          = "http"
 )
 
 type Config struct {

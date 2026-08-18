@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -56,44 +57,38 @@ func TestReportWebSocketURLWithConfigAddsQueryParameters(t *testing.T) {
 	}
 }
 
-func TestWSSReportIntervalRoundsUpReportIntervalByFifteen(t *testing.T) {
-	if got := wssReportInterval(60); got != 4*time.Second {
-		t.Fatalf("wssReportInterval(60) = %s, want 4s", got)
-	}
-	if got := wssReportInterval(30); got != 2*time.Second {
-		t.Fatalf("wssReportInterval(30) = %s, want 2s", got)
-	}
-	if got := wssReportInterval(21); got != 2*time.Second {
-		t.Fatalf("wssReportInterval(21) = %s, want 2s", got)
-	}
-}
-
-func TestWSSConnectedEffectiveCollectIntervalTracksWSSReportInterval(t *testing.T) {
+func TestWSSEffectiveCollectIntervalUsesNormalizedConfig(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
 			ReportInterval:  30,
-			CollectInterval: 0,
+			CollectInterval: 2,
 		},
 	}
-	agent.reporter = &reportTransport{agent: &agent, conn: &webSocketConn{}}
-	if got := agent.effectiveCollectInterval(true); got != 2*time.Second {
-		t.Fatalf("effectiveCollectInterval collect=0 = %s, want 2s", got)
+	if got := agent.effectiveCollectInterval(); got != 2*time.Second {
+		t.Fatalf("effectiveCollectInterval collect=2 = %s, want 2s", got)
 	}
 	if got := agent.tickInterval(); got != 2*time.Second {
-		t.Fatalf("tickInterval collect=0 = %s, want 2s", got)
+		t.Fatalf("tickInterval collect=2 = %s, want 2s", got)
 	}
 
 	agent.cfg.CollectInterval = 10
-	if got := agent.effectiveCollectInterval(true); got != 2*time.Second {
-		t.Fatalf("effectiveCollectInterval collect=10 = %s, want 2s", got)
+	if got := agent.effectiveCollectInterval(); got != 10*time.Second {
+		t.Fatalf("effectiveCollectInterval collect=10 = %s, want 10s", got)
 	}
 
 	agent.cfg.CollectInterval = 1
-	if got := agent.effectiveCollectInterval(true); got != time.Second {
+	if got := agent.effectiveCollectInterval(); got != time.Second {
 		t.Fatalf("effectiveCollectInterval collect=1 = %s, want 1s", got)
 	}
 	if got := agent.tickInterval(); got != time.Second {
 		t.Fatalf("tickInterval collect=1 = %s, want 1s", got)
+	}
+}
+
+func TestWSSReportIntervalDefaultsToTwoSecondsBeforeAck(t *testing.T) {
+	agent := Agent{cfg: Config{ReportInterval: 60}, reporter: &reportTransport{}}
+	if got := agent.currentWSSReportInterval(); got != 2*time.Second {
+		t.Fatalf("currentWSSReportInterval() = %s, want 2s", got)
 	}
 }
 
@@ -105,7 +100,7 @@ func TestHTTPCollectIntervalZeroDoesNotEnableSamples(t *testing.T) {
 			ConnectionMode:  connectionModeHTTP,
 		},
 	}
-	if got := agent.effectiveCollectInterval(false); got != 0 {
+	if got := agent.effectiveCollectInterval(); got != 0 {
 		t.Fatalf("effectiveCollectInterval http collect=0 = %s, want 0", got)
 	}
 	if got := agent.tickInterval(); got != 30*time.Second {
@@ -422,13 +417,14 @@ func TestWSSConfigBodySupportsPayloadObject(t *testing.T) {
 	body, headers, ok := wssConfigBodyAndHeaders(wsServerFrame{
 		Type: "config",
 		Payload: map[string]any{
-			"collect_interval": float64(0),
-			"report_interval":  float64(60),
-			"reset_day":        float64(1),
-			"schema_version":   configSchemaVersion,
-			"interface":        "",
-			"connection_mode":  "auto",
-			"configMd5":        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"collect_interval":    float64(0),
+			"report_interval":     float64(60),
+			"wss_report_interval": float64(2),
+			"reset_day":           float64(1),
+			"schema_version":      configSchemaVersion,
+			"interface":           "",
+			"connection_mode":     "auto",
+			"configMd5":           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		},
 	})
 	if !ok {
@@ -441,6 +437,9 @@ func TestWSSConfigBodySupportsPayloadObject(t *testing.T) {
 	if values.Get("report_interval") != "60" {
 		t.Fatalf("report_interval = %q, want 60", values.Get("report_interval"))
 	}
+	if values.Get("wss_report_interval") != "2" {
+		t.Fatalf("wss_report_interval = %q, want 2", values.Get("wss_report_interval"))
+	}
 	if headers.Get("X-Agent-Config-Md5") != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		t.Fatalf("X-Agent-Config-Md5 = %q", headers.Get("X-Agent-Config-Md5"))
 	}
@@ -449,13 +448,13 @@ func TestWSSConfigBodySupportsPayloadObject(t *testing.T) {
 func TestWSSConfigBodySupportsConfigBodyAndConfigObject(t *testing.T) {
 	body, headers, ok := wssConfigBodyAndHeaders(wsServerFrame{
 		Type:       "ack",
-		ConfigBody: "collect_interval=0&report_interval=60&reset_day=1&schema_version=4&interface=&connection_mode=auto",
+		ConfigBody: "collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto",
 		ConfigMD5:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	})
 	if !ok {
 		t.Fatal("config_body frame returned ok=false")
 	}
-	if string(body) != "collect_interval=0&report_interval=60&reset_day=1&schema_version=4&interface=&connection_mode=auto" {
+	if string(body) != "collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto" {
 		t.Fatalf("body = %q", string(body))
 	}
 	if headers.Get("X-Agent-Config-Md5") != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
@@ -508,15 +507,28 @@ func TestReportTransportWSSConfigAppliesRemoteConfig(t *testing.T) {
 	transport := reportTransport{agent: &agent}
 	transport.handleConfigFrame(wsServerFrame{
 		Type:      "config",
-		Config:    "collect_interval=0&report_interval=120&reset_day=1&schema_version=4&interface=&connection_mode=auto",
+		Config:    "collect_interval=10&report_interval=120&wss_report_interval=4&reset_day=1&schema_version=5&interface=&connection_mode=auto",
 		ConfigMD5: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	})
 
 	if agent.cfg.ReportInterval != 120 {
 		t.Fatalf("ReportInterval = %d, want 120", agent.cfg.ReportInterval)
 	}
+	if agent.cfg.CollectInterval != 4 {
+		t.Fatalf("CollectInterval = %d, want 4", agent.cfg.CollectInterval)
+	}
+	if got := agent.effectiveCollectInterval(); got != 4*time.Second {
+		t.Fatalf("effectiveCollectInterval = %s, want 4s", got)
+	}
 	if agent.cfg.ConfigMD5 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		t.Fatalf("ConfigMD5 = %q", agent.cfg.ConfigMD5)
+	}
+	persisted, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	if strings.Contains(string(persisted), "WSS_REPORT_INTERVAL") {
+		t.Fatal("WSS_REPORT_INTERVAL should not be persisted in agent config")
 	}
 	select {
 	case <-agent.wake:
@@ -545,7 +557,7 @@ func TestReportTransportWSSConfigCanSwitchToHTTP(t *testing.T) {
 	agent.reporter = &transport
 	transport.handleConfigFrame(wsServerFrame{
 		Type:      "config",
-		Config:    "collect_interval=0&report_interval=60&reset_day=1&schema_version=4&interface=&connection_mode=http",
+		Config:    "collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=http",
 		ConfigMD5: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	})
 
@@ -581,7 +593,7 @@ func TestReportTransportWSSConfigAllowsMissingMD5(t *testing.T) {
 	transport := reportTransport{agent: &agent}
 	transport.handleConfigFrame(wsServerFrame{
 		Type:   "config",
-		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=4&interface=&connection_mode=auto",
+		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=5&interface=&connection_mode=auto",
 	})
 
 	if agent.cfg.ReportInterval != 120 {
@@ -609,11 +621,11 @@ func TestReportTransportWSSConfigThrottlesToOneMinute(t *testing.T) {
 	transport := reportTransport{agent: &agent}
 	transport.handleConfigFrame(wsServerFrame{
 		Type:   "config",
-		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=4&interface=&connection_mode=auto",
+		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=5&interface=&connection_mode=auto",
 	})
 	transport.handleConfigFrame(wsServerFrame{
 		Type:   "config",
-		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=4&interface=&connection_mode=auto",
+		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=5&interface=&connection_mode=auto",
 	})
 	if agent.cfg.ReportInterval != 120 {
 		t.Fatalf("ReportInterval after throttled config = %d, want 120", agent.cfg.ReportInterval)
@@ -624,7 +636,7 @@ func TestReportTransportWSSConfigThrottlesToOneMinute(t *testing.T) {
 	transport.mu.Unlock()
 	transport.handleConfigFrame(wsServerFrame{
 		Type:   "config",
-		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=4&interface=&connection_mode=auto",
+		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=5&interface=&connection_mode=auto",
 	})
 	if agent.cfg.ReportInterval != 180 {
 		t.Fatalf("ReportInterval after throttle window = %d, want 180", agent.cfg.ReportInterval)

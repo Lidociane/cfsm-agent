@@ -223,7 +223,7 @@ func (a *Agent) wakeTick() {
 
 func (a *Agent) tickInterval() time.Duration {
 	active := a.currentWSSReportInterval()
-	if collect := a.effectiveCollectInterval(a.reporter != nil && a.reporter.connected()); collect > 0 {
+	if collect := a.effectiveCollectInterval(); collect > 0 {
 		active = durationGCD(active, collect)
 	}
 	if active <= 0 {
@@ -232,27 +232,17 @@ func (a *Agent) tickInterval() time.Duration {
 	return active
 }
 
-func (a *Agent) effectiveCollectInterval(wssConnected bool) time.Duration {
+func (a *Agent) effectiveCollectInterval() time.Duration {
 	collect := time.Duration(a.cfg.CollectInterval) * time.Second
 	if collect < 0 {
 		collect = 0
-	}
-	if !wssConnected {
-		return collect
-	}
-	wssInterval := a.currentWSSReportInterval()
-	if wssInterval <= 0 {
-		return collect
-	}
-	if collect <= 0 || collect > wssInterval {
-		return wssInterval
 	}
 	return collect
 }
 
 func (a *Agent) currentWSSReportInterval() time.Duration {
 	if a.reporter != nil && a.usesWSS() {
-		fallback := wssReportInterval(a.cfg.ReportInterval)
+		fallback := time.Duration(defaultWSSReportIntervalSec) * time.Second
 		return a.reporter.reportInterval(fallback)
 	}
 	reportInterval := time.Duration(a.cfg.ReportInterval) * time.Second
@@ -286,7 +276,7 @@ func (a *Agent) tick() {
 	}
 	shouldPostReport := postDue && postAllowed
 	shouldSample := false
-	if collectInterval := a.effectiveCollectInterval(wssConnected); collectInterval > 0 {
+	if collectInterval := a.effectiveCollectInterval(); collectInterval > 0 {
 		shouldSample = a.lastSample.IsZero() || now.Sub(a.lastSample) >= collectInterval
 	}
 	if !shouldWSSReport && !shouldPostReport && !shouldSample {
@@ -701,19 +691,20 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		return err
 	}
 	allowed := map[string]bool{
-		"collect_interval": true,
-		"report_interval":  true,
-		"reset_day":        true,
-		"schema_version":   true,
-		"custom_ct":        true,
-		"custom_cu":        true,
-		"custom_cm":        true,
-		"custom_bd":        true,
-		"interface":        true,
-		"connection_mode":  true,
-		"rx_correction":    true,
-		"tx_correction":    true,
-		"update":           true,
+		"collect_interval":    true,
+		"report_interval":     true,
+		"wss_report_interval": true,
+		"reset_day":           true,
+		"schema_version":      true,
+		"custom_ct":           true,
+		"custom_cu":           true,
+		"custom_cm":           true,
+		"custom_bd":           true,
+		"interface":           true,
+		"connection_mode":     true,
+		"rx_correction":       true,
+		"tx_correction":       true,
+		"update":              true,
 	}
 	for key := range values {
 		if !allowed[key] {
@@ -724,7 +715,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if update != "" && update != "0" && update != "1" {
 		return fmt.Errorf("invalid update %s", update)
 	}
-	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface") || values.Has("connection_mode")
+	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("wss_report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface") || values.Has("connection_mode")
 	hasCorrection := values.Has("rx_correction") || values.Has("tx_correction")
 	if !hasConfig {
 		if hasCorrection {
@@ -748,12 +739,16 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	}
 	collect := parseIntDefault(values.Get("collect_interval"), -1)
 	report := parseIntDefault(values.Get("report_interval"), -1)
+	wssReport := parseIntDefault(values.Get("wss_report_interval"), defaultWSSReportIntervalSec)
 	reset := parseIntDefault(values.Get("reset_day"), -1)
-	if !inIntSet(collect, 0, 1, 2, 5, 10) {
+	if collect < 0 || collect > maxWSSReportIntervalSec {
 		return fmt.Errorf("invalid collect_interval %d", collect)
 	}
 	if !inIntSet(report, 30, 60, 120, 180) {
 		return fmt.Errorf("invalid report_interval %d", report)
+	}
+	if wssReport < minWSSReportIntervalSec || wssReport > maxWSSReportIntervalSec {
+		return fmt.Errorf("invalid wss_report_interval %d", wssReport)
 	}
 	if reset < 0 || reset > 31 {
 		return fmt.Errorf("invalid reset_day %d", reset)
@@ -772,14 +767,18 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if err != nil {
 		return err
 	}
+	effectiveCollect := collect
+	if connectionMode == connectionModeAuto && (collect == 0 || collect > wssReport) {
+		effectiveCollect = wssReport
+	}
 	shouldApply := false
 	if hasRemoteMD5 {
 		shouldApply = newMD5 != a.cfg.ConfigMD5
 	} else {
-		shouldApply = a.remoteConfigDiffers(values, collect, report, reset, iface, connectionMode)
+		shouldApply = a.remoteConfigDiffers(values, effectiveCollect, report, reset, iface, connectionMode)
 	}
 	if shouldApply {
-		a.cfg.CollectInterval = collect
+		a.cfg.CollectInterval = effectiveCollect
 		a.cfg.ReportInterval = report
 		a.cfg.ResetDay = reset
 		a.cfg.CTNode = values.Get("custom_ct")
