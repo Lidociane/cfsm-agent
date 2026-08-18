@@ -741,7 +741,10 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	report := parseIntDefault(values.Get("report_interval"), -1)
 	wssReport := parseIntDefault(values.Get("wss_report_interval"), defaultWSSReportIntervalSec)
 	reset := parseIntDefault(values.Get("reset_day"), -1)
-	if collect < 0 || collect > maxWSSReportIntervalSec {
+	// Keep accepting the legacy sampling interval values. In auto mode a
+	// value above the WSS cadence is normalized to wss_report_interval below,
+	// while HTTP mode continues to honor the configured sampling interval.
+	if !inIntSet(collect, 0, 1, 2, 5, 10) {
 		return fmt.Errorf("invalid collect_interval %d", collect)
 	}
 	if !inIntSet(report, 30, 60, 120, 180) {

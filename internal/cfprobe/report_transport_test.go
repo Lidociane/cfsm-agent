@@ -349,8 +349,8 @@ func TestReportTransportUsesServerSuggestedWSSReportInterval(t *testing.T) {
 	transport := &reportTransport{agent: &agent}
 	agent.reporter = transport
 
-	if got := agent.currentWSSReportInterval(); got != 4*time.Second {
-		t.Fatalf("currentWSSReportInterval before ack = %s, want 4s", got)
+	if got := agent.currentWSSReportInterval(); got != 2*time.Second {
+		t.Fatalf("currentWSSReportInterval before ack = %s, want 2s", got)
 	}
 
 	next := int64(60000)
@@ -370,8 +370,8 @@ func TestReportTransportUsesServerSuggestedWSSReportInterval(t *testing.T) {
 	}
 
 	transport.resetReportInterval()
-	if got := agent.currentWSSReportInterval(); got != 4*time.Second {
-		t.Fatalf("currentWSSReportInterval after reset = %s, want 4s", got)
+	if got := agent.currentWSSReportInterval(); got != 2*time.Second {
+		t.Fatalf("currentWSSReportInterval after reset = %s, want 2s", got)
 	}
 }
 
