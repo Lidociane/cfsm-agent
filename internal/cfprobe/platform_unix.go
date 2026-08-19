@@ -721,6 +721,10 @@ func formatInstanceLockOwner(data []byte) string {
 		values["user"], values["uid"], values["pid"], values["exe"], values["config"])
 }
 
+func applyWindowsScheduledUpdate(_ Paths) error {
+	return errors.New("scheduled Windows update apply is unavailable on this platform")
+}
+
 func copySelfTo(dst string) error {
 	src, err := os.Executable()
 	if err != nil {
@@ -869,6 +873,10 @@ func windowsServiceArgs(_ Paths, _ bool) []string {
 
 func writeWindowsTaskWrapper(_ Paths, _ bool) error {
 	return nil
+}
+
+func windowsTaskWrapperFile(_ Paths) string {
+	return ""
 }
 
 var errWindowsService = errors.New("Windows 服务管理仅在 Windows 平台可用")

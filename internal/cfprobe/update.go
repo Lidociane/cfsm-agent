@@ -255,7 +255,7 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string) {
 
 func scheduleUpdateInstall(paths Paths, binPath string, now int64) (string, error) {
 	if runtime.GOOS == "windows" {
-		return scheduleWindowsUpdateInstall(binPath)
+		return scheduleWindowsUpdateInstall(paths, binPath)
 	}
 	if paths.UserMode {
 		return scheduleUserModeUpdateInstall(paths, binPath)
@@ -349,11 +349,12 @@ func scheduleUnixUpdateInstall(serviceName, logFile, binPath string, now int64) 
 	return "nohup", nil
 }
 
-func scheduleWindowsUpdateInstall(binPath string) (string, error) {
+func scheduleWindowsUpdateInstall(paths Paths, binPath string) (string, error) {
 	script := strings.Join([]string{
+		"$ErrorActionPreference = 'Continue'",
 		fmt.Sprintf("Start-Sleep -Seconds %d", int(autoUpdateDelay.Seconds())),
-		"& " + powerShellLiteral(binPath) + " install",
-		"Remove-Item -Force " + powerShellLiteral(binPath) + " -ErrorAction SilentlyContinue",
+		"& " + powerShellLiteral(binPath) + " upgrade-apply >> " + powerShellLiteral(paths.LogFile) + " 2>&1",
+		"if ($LASTEXITCODE -eq 0) { Remove-Item -LiteralPath " + powerShellLiteral(binPath) + " -Force -ErrorAction SilentlyContinue }",
 	}, "; ")
 	cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script)
 	if err := cmd.Start(); err != nil {
@@ -361,6 +362,15 @@ func scheduleWindowsUpdateInstall(binPath string) (string, error) {
 	}
 	_ = cmd.Process.Release()
 	return "powershell", nil
+}
+
+func ApplyScheduledUpdate(buildVersion string) error {
+	if runtime.GOOS != "windows" {
+		return errors.New("scheduled upgrade apply is only supported on Windows")
+	}
+	paths := defaultPaths()
+	fmt.Printf("[INFO] applying scheduled update version=%s target=%s\n", buildVersion, paths.BinaryFile)
+	return applyWindowsScheduledUpdate(paths)
 }
 
 func scheduleUserModeUpdateInstall(paths Paths, binPath string) (string, error) {

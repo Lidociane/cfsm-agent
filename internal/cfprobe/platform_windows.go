@@ -107,7 +107,25 @@ func copySelfTo(dst string) error {
 	if err = out.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, dst)
+	backup := dst + ".previous"
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if fileExists(dst) {
+		if err := renameWindowsFileWithRetry(dst, backup, 5*time.Second); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	if err := renameWindowsFileWithRetry(tmp, dst, 5*time.Second); err != nil {
+		if fileExists(backup) {
+			_ = renameWindowsFileWithRetry(backup, dst, 5*time.Second)
+		}
+		return err
+	}
+	_ = os.Remove(backup)
+	return nil
 }
 
 func startDetached(binary string, args []string, logFile, pidFile string) error {
@@ -149,6 +167,19 @@ func waitWindowsProbeProcessesStopped(paths Paths, timeout time.Duration) {
 	for {
 		if !windowsProbeProcessesRunning(paths) || time.Now().After(deadline) {
 			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func waitWindowsProbeProcessesStarted(paths Paths, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if windowsProbeProcessesRunning(paths) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -256,6 +287,177 @@ func delayedPathInDir(delayed []string, dir string) bool {
 
 func quotePowerShellLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func applyWindowsScheduledUpdate(paths Paths) error {
+	src, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	src, _ = filepath.EvalSymlinks(src)
+	dst, _ := filepath.Abs(paths.BinaryFile)
+	if strings.EqualFold(src, dst) {
+		fmt.Println("[INFO] update binary already installed; starting scheduled task")
+		return startService(paths, false)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(paths.ConfigDir, 0o755); err != nil {
+		return err
+	}
+
+	backup := filepath.Join(paths.ConfigDir, paths.ServiceName+"-rollback.exe")
+	previous := dst + ".previous"
+	staged := dst + ".new"
+	if err := removeWindowsUpdateScratch(staged, previous); err != nil {
+		return err
+	}
+	if fileExists(dst) {
+		if err := copyWindowsFile(dst, backup, 0o755); err != nil {
+			return fmt.Errorf("backup installed binary: %w", err)
+		}
+	}
+	if err := copyWindowsFile(src, staged, 0o755); err != nil {
+		_ = os.Remove(staged)
+		return fmt.Errorf("stage updated binary: %w", err)
+	}
+	if runCommandQuiet("schtasks", "/Query", "/TN", paths.ServiceName) != nil {
+		_ = os.Remove(staged)
+		return fmt.Errorf("Windows scheduled task %s is missing", paths.ServiceName)
+	}
+	if !fileExists(windowsTaskWrapperFile(paths)) {
+		_ = os.Remove(staged)
+		return fmt.Errorf("Windows task wrapper is missing: %s", windowsTaskWrapperFile(paths))
+	}
+
+	fmt.Println("[INFO] stopping Windows scheduled task for binary swap")
+	stopWindowsScheduledTask(paths)
+	if fileExists(dst) {
+		if err := renameWindowsFileWithRetry(dst, previous, 5*time.Second); err != nil {
+			_ = os.Remove(staged)
+			_ = startService(paths, false)
+			return fmt.Errorf("move current binary aside: %w", err)
+		}
+	}
+	if err := renameWindowsFileWithRetry(staged, dst, 5*time.Second); err != nil {
+		rollbackErr := rollbackWindowsScheduledUpdate(paths, dst, previous, backup)
+		return joinErrors(fmt.Errorf("install updated binary: %w", err), rollbackErr)
+	}
+
+	fmt.Println("[INFO] starting Windows scheduled task after update")
+	if err := startService(paths, false); err != nil {
+		rollbackErr := rollbackWindowsScheduledUpdate(paths, dst, previous, backup)
+		return joinErrors(fmt.Errorf("start updated scheduled task: %w", err), rollbackErr)
+	}
+	if !waitWindowsProbeProcessesStarted(paths, 10*time.Second) {
+		rollbackErr := rollbackWindowsScheduledUpdate(paths, dst, previous, backup)
+		return joinErrors(errors.New("updated probe did not stay running"), rollbackErr)
+	}
+	_ = os.Remove(previous)
+	fmt.Println("[INFO] Windows scheduled update applied")
+	return nil
+}
+
+func removeWindowsUpdateScratch(paths ...string) error {
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func rollbackWindowsScheduledUpdate(paths Paths, dst, previous, backup string) error {
+	fmt.Println("[WARN] rolling back Windows scheduled update")
+	stopWindowsScheduledTask(paths)
+	_ = os.Remove(dst)
+	var restoreErr error
+	if fileExists(previous) {
+		restoreErr = renameWindowsFileWithRetry(previous, dst, 5*time.Second)
+	}
+	if restoreErr != nil || !fileExists(dst) {
+		if fileExists(backup) {
+			restoreErr = copyWindowsFile(backup, dst, 0o755)
+		}
+	}
+	if restoreErr != nil {
+		return fmt.Errorf("rollback restore failed: %w", restoreErr)
+	}
+	if !fileExists(dst) {
+		return errors.New("rollback restore failed: no backup binary available")
+	}
+	if err := startService(paths, false); err != nil {
+		return fmt.Errorf("rollback start failed: %w", err)
+	}
+	if !waitWindowsProbeProcessesStarted(paths, 10*time.Second) {
+		return errors.New("rollback start failed: probe did not stay running")
+	}
+	fmt.Println("[INFO] Windows scheduled update rolled back")
+	return nil
+}
+
+func renameWindowsFileWithRetry(src, dst string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := os.Rename(src, dst); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func copyWindowsFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err = out.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+func joinErrors(primary, secondary error) error {
+	if secondary == nil {
+		return primary
+	}
+	if primary == nil {
+		return secondary
+	}
+	return fmt.Errorf("%v; %w", primary, secondary)
 }
 
 func runCommand(name string, args ...string) error {

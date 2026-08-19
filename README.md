@@ -63,6 +63,8 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/
 PowerShell -ExecutionPolicy Bypass -File $script install -id=SERVER_ID -secret=SECRET -url=WORKER_URL
 ```
 
+Windows 上如果安装时开启 `-auto_update=1`，自动更新会下载并执行 `C:\ProgramData\cf-probe\cf-probe-update.exe`，部分杀毒软件或安全策略可能拦截。被拦截时请将 `C:\Program Files\cf-probe\cf-probe.exe`、`C:\ProgramData\cf-probe\cf-probe-update.exe`、`C:\ProgramData\cf-probe\cf-probe.cmd` 加入白名单；如环境不允许放行，建议保持 `-auto_update=0`，需要升级时手动指定版本安装。
+
 ## 指定版本或 GitHub 代理
 
 默认安装最新 release。需要指定版本时：

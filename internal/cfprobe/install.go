@@ -58,6 +58,7 @@ func Install(opts InstallOptions, version string) error {
 	}
 	fmt.Printf("[INFO] Install binary: %s\n", paths.BinaryFile)
 	fmt.Printf("[INFO] Config file: %s\n", paths.ConfigFile)
+	printWindowsAutoUpdateWarning(paths, opts)
 
 	stopService(paths)
 	stopCurrentUserProbeInstances()
@@ -126,6 +127,17 @@ func mergeExplicitInstallConfig(dst *Config, src Config, explicit map[string]boo
 			dst.UpdateProxy = src.UpdateProxy
 		}
 	}
+}
+
+func printWindowsAutoUpdateWarning(paths Paths, opts InstallOptions) {
+	if runtime.GOOS != "windows" || !opts.AutoUpdate {
+		return
+	}
+	fmt.Println("[WARN] Windows 自动更新会下载并执行 cf-probe-update.exe，可能被杀毒软件或安全策略拦截。")
+	fmt.Printf("[WARN] 如被拦截，请将以下路径加入白名单: %s, %s, %s\n",
+		paths.BinaryFile,
+		filepath.Join(paths.ConfigDir, "cf-probe-update.exe"),
+		windowsTaskWrapperFile(paths))
 }
 
 func Uninstall(version string) error {
