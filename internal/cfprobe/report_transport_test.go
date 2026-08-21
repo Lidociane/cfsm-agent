@@ -1,7 +1,9 @@
 package cfprobe
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -341,6 +343,90 @@ func TestReportTransportProtocolDelayPausesPostFallback(t *testing.T) {
 	}
 }
 
+func TestReportTransportStopWakesRetrySleep(t *testing.T) {
+	transport := &reportTransport{
+		agent: &Agent{log: newLogger(false)},
+		wake:  make(chan struct{}, 1),
+	}
+	done := make(chan bool, 1)
+	go func() {
+		done <- transport.waitNetworkRetry(context.Background(), errors.New("temporary network error"), time.Minute)
+	}()
+
+	transport.stop("test")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not wake WSS retry sleep")
+	}
+}
+
+func TestReportTransportStartWakesStoppedRun(t *testing.T) {
+	transport := &reportTransport{
+		agent:   &Agent{log: newLogger(false)},
+		wsURL:   "ws://example.com/update",
+		wake:    make(chan struct{}, 1),
+		running: true,
+		stopped: true,
+	}
+	if transport.start(context.Background()) {
+		t.Fatal("start returned true while run loop was already active")
+	}
+	if transport.isStopped() {
+		t.Fatal("start did not clear stopped state")
+	}
+	if !transport.restartRequested {
+		t.Fatal("start did not request restart for an exiting run loop")
+	}
+	select {
+	case <-transport.wake:
+	default:
+		t.Fatal("start did not wake stopped run loop")
+	}
+}
+
+func TestReportTransportFinishRunRestartsAfterStartExitRace(t *testing.T) {
+	agent := Agent{
+		cfg: Config{ConnectionMode: connectionModeAuto},
+		log: newLogger(false),
+	}
+	transport := &reportTransport{
+		agent:   &agent,
+		wsURL:   "ws://example.com/update",
+		wake:    make(chan struct{}, 1),
+		running: true,
+		stopped: true,
+	}
+	agent.reporter = transport
+
+	transport.start(context.Background())
+	if !transport.finishRun(context.Background()) {
+		t.Fatal("finishRun did not restart after start cleared stopped state")
+	}
+	if !transport.running {
+		t.Fatal("finishRun did not keep running state for restarted loop")
+	}
+}
+
+func TestReportTransportSetConnIfActiveRejectsStoppedTransport(t *testing.T) {
+	agent := Agent{
+		cfg: Config{ConnectionMode: connectionModeAuto},
+		log: newLogger(false),
+	}
+	transport := &reportTransport{
+		agent:   &agent,
+		stopped: true,
+	}
+	agent.reporter = transport
+
+	if transport.setConnIfActive(context.Background(), &webSocketConn{}) {
+		t.Fatal("setConnIfActive accepted a stopped transport")
+	}
+	if transport.conn != nil {
+		t.Fatal("setConnIfActive stored a connection while stopped")
+	}
+}
+
 func TestAgentWSSRuntimeHeadersTemporarilyDisableAndRestoreWSS(t *testing.T) {
 	agent := Agent{
 		cfg: Config{
@@ -397,6 +483,25 @@ func TestWSSScheduleInactiveHandshakeIsSoftReject(t *testing.T) {
 	})
 	if !ok || reason != agentWSSScheduleInactive {
 		t.Fatalf("wssScheduleInactiveFromHandshake() = %q, %v", reason, ok)
+	}
+
+	reason, ok = wssScheduleInactiveFromHandshake(&wsHandshakeError{
+		StatusCode: http.StatusConflict,
+		Headers: http.Header{
+			"X-Agent-Wss-Mode":   []string{"inactive"},
+			"X-Agent-Wss-Reason": []string{"wss_schedule_inactive"},
+		},
+	})
+	if !ok || reason != agentWSSScheduleInactive {
+		t.Fatalf("header wssScheduleInactiveFromHandshake() = %q, %v", reason, ok)
+	}
+
+	reason, ok = wssScheduleInactiveFromHandshake(&wsHandshakeError{
+		StatusCode: http.StatusConflict,
+		Body:       "wss_schedule_empty",
+	})
+	if !ok || reason != agentWSSScheduleEmpty {
+		t.Fatalf("text wssScheduleInactiveFromHandshake() = %q, %v", reason, ok)
 	}
 
 	_, ok = wssScheduleInactiveFromHandshake(&wsHandshakeError{

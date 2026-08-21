@@ -36,8 +36,10 @@ type reportTransport struct {
 	lastPostDelayLog time.Time
 	lastConfigAt     time.Time
 	nextReportAfter  time.Duration
+	wake             chan struct{}
 	running          bool
 	stopped          bool
+	restartRequested bool
 }
 
 type wsProtocolDelayError struct {
@@ -100,6 +102,7 @@ func newReportTransport(a *Agent) *reportTransport {
 	return &reportTransport{
 		agent: a,
 		wsURL: wsURL,
+		wake:  make(chan struct{}, 1),
 	}
 }
 
@@ -189,9 +192,20 @@ func (r *reportTransport) start(ctx context.Context) bool {
 		return false
 	}
 	r.mu.Lock()
+	if r.wake == nil {
+		r.wake = make(chan struct{}, 1)
+	}
+	wake := r.wake
 	if r.running {
+		wasStopped := r.stopped
 		r.stopped = false
+		if wasStopped {
+			r.restartRequested = true
+		}
 		r.mu.Unlock()
+		if wasStopped {
+			signalReportTransportWake(wake)
+		}
 		return false
 	}
 	r.running = true
@@ -211,10 +225,12 @@ func (r *reportTransport) stop(reason string) {
 	r.pauseReason = ""
 	conn := r.conn
 	r.conn = nil
+	wake := r.wake
 	r.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close()
 	}
+	signalReportTransportWake(wake)
 	if reason != "" {
 		r.agent.log.info("WSS stopped reason=%s", reason)
 	}
@@ -234,21 +250,23 @@ func (r *reportTransport) run(ctx context.Context) {
 		return
 	}
 	defer func() {
-		r.mu.Lock()
-		r.running = false
-		r.mu.Unlock()
+		if r.finishRun(ctx) {
+			go r.run(ctx)
+		}
 	}()
 	backoff := wssNetworkMinRetry
 	for {
-		if r.isStopped() || !r.agent.usesWSS() {
+		if !r.shouldRun(ctx) {
 			return
 		}
+		r.clearRestartRequest()
 		if !r.waitProtocolPause(ctx) {
 			return
 		}
-		if r.isStopped() || !r.agent.usesWSS() {
+		if !r.shouldRun(ctx) {
 			return
 		}
+		r.clearRestartRequest()
 		conn, headers, started, received, err := r.dial(ctx)
 		if err != nil {
 			if handshakeErr := (*wsHandshakeError)(nil); errors.As(err, &handshakeErr) {
@@ -269,6 +287,10 @@ func (r *reportTransport) run(ctx context.Context) {
 			backoff = nextWSSBackoff(backoff)
 			continue
 		}
+		if !r.shouldRun(ctx) {
+			_ = conn.Close()
+			return
+		}
 		backoff = wssNetworkMinRetry
 		r.calibrateHandshakeDate(headers, started, received)
 
@@ -280,7 +302,10 @@ func (r *reportTransport) run(ctx context.Context) {
 			}
 			return
 		}
-		r.setConn(conn)
+		if !r.setConnIfActive(ctx, conn) {
+			_ = conn.Close()
+			return
+		}
 		r.agent.log.info("WSS connected url=%s protocol=%s ts=%d", r.wsURL, hello.Protocol, hello.TS)
 
 		err = r.readLoop(ctx, conn)
@@ -291,6 +316,34 @@ func (r *reportTransport) run(ctx context.Context) {
 		}
 		return
 	}
+}
+
+func (r *reportTransport) finishRun(ctx context.Context) bool {
+	usesWSS := r != nil && r.agent != nil && r.agent.usesWSS()
+	ctxDone := isContextDone(ctx)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	restart := !ctxDone && r.wsURL != "" && !r.stopped && (usesWSS || r.restartRequested)
+	r.restartRequested = false
+	if restart {
+		r.running = true
+		return true
+	}
+	r.running = false
+	return false
+}
+
+func (r *reportTransport) shouldRun(ctx context.Context) bool {
+	if r == nil || r.agent == nil || isContextDone(ctx) || !r.agent.usesWSS() {
+		return false
+	}
+	return !r.isStopped()
+}
+
+func (r *reportTransport) clearRestartRequest() {
+	r.mu.Lock()
+	r.restartRequested = false
+	r.mu.Unlock()
 }
 
 func (r *reportTransport) dial(ctx context.Context) (*webSocketConn, http.Header, time.Time, time.Time, error) {
@@ -602,10 +655,17 @@ func (r *reportTransport) currentConn() *webSocketConn {
 	return r.conn
 }
 
-func (r *reportTransport) setConn(conn *webSocketConn) {
+func (r *reportTransport) setConnIfActive(ctx context.Context, conn *webSocketConn) bool {
+	if r == nil || conn == nil || r.agent == nil || isContextDone(ctx) || !r.agent.usesWSS() {
+		return false
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.stopped {
+		return false
+	}
 	r.conn = conn
+	return true
 }
 
 func (r *reportTransport) clearConn(conn *webSocketConn) {
@@ -632,7 +692,7 @@ func (r *reportTransport) waitProtocolPause(ctx context.Context) bool {
 		if delay <= 0 {
 			return true
 		}
-		if !sleepContext(ctx, delay) {
+		if !r.sleep(ctx, delay) {
 			return false
 		}
 	}
@@ -643,7 +703,7 @@ func (r *reportTransport) waitNetworkRetry(ctx context.Context, err error, delay
 		delay = wssNetworkMinRetry
 	}
 	r.agent.log.info("WSS retry delayed reason=%v delay=%s", err, delay)
-	return sleepContext(ctx, delay)
+	return r.sleep(ctx, delay)
 }
 
 func (r *reportTransport) handleConnectionError(ctx context.Context, err error, backoff *time.Duration) bool {
@@ -709,11 +769,33 @@ func wssScheduleInactiveFromHandshake(err *wsHandshakeError) (string, bool) {
 	if err == nil || err.StatusCode != http.StatusConflict {
 		return "", false
 	}
+	if reason, ok := wssScheduleInactiveFromHeaders(err.Headers); ok {
+		return reason, true
+	}
+	body := strings.TrimSpace(err.Body)
+	if isWSSScheduleInactiveReason(body) {
+		return strings.ToLower(body), true
+	}
 	var payload wsScheduleInactivePayload
-	if json.Unmarshal([]byte(err.Body), &payload) != nil {
+	if json.Unmarshal([]byte(body), &payload) != nil {
 		return "", false
 	}
 	reason := firstNonEmpty(payload.Text, payload.Error)
+	if !isWSSScheduleInactiveReason(reason) {
+		return "", false
+	}
+	return reason, true
+}
+
+func wssScheduleInactiveFromHeaders(headers http.Header) (string, bool) {
+	if headers == nil {
+		return "", false
+	}
+	mode := strings.ToLower(strings.TrimSpace(headers.Get(agentWSSModeHeader)))
+	if mode != "" && mode != agentWSSModeInactive {
+		return "", false
+	}
+	reason := strings.ToLower(strings.TrimSpace(headers.Get(agentWSSReasonHeader)))
 	if !isWSSScheduleInactiveReason(reason) {
 		return "", false
 	}
@@ -766,6 +848,42 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 		return false
 	case <-timer.C:
 		return true
+	}
+}
+
+func (r *reportTransport) sleep(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	if r == nil {
+		return sleepContext(ctx, d)
+	}
+	r.mu.Lock()
+	if r.wake == nil {
+		r.wake = make(chan struct{}, 1)
+	}
+	wake := r.wake
+	r.mu.Unlock()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-wake:
+		return true
+	case <-timer.C:
+		return true
+	}
+}
+
+func signalReportTransportWake(wake chan struct{}) {
+	if wake == nil {
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
 	}
 }
 
