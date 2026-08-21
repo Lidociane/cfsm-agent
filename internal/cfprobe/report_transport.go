@@ -44,7 +44,18 @@ type wsProtocolDelayError struct {
 	reason string
 }
 
+type wsScheduleInactiveError struct {
+	reason string
+}
+
 func (e *wsProtocolDelayError) Error() string {
+	return e.reason
+}
+
+func (e *wsScheduleInactiveError) Error() string {
+	if e.reason == "" {
+		return agentWSSScheduleInactive
+	}
 	return e.reason
 }
 
@@ -62,6 +73,8 @@ type wsServerFrame struct {
 	NextWSSReportAfterMs *int64 `json:"nextWssReportAfterMs"`
 	Error                string `json:"error"`
 	Code                 int    `json:"code"`
+	Text                 string `json:"text"`
+	ConnectionMode       string `json:"connection_mode"`
 	Body                 string `json:"body"`
 	ConfigBody           string `json:"config_body"`
 	Config               any    `json:"config"`
@@ -70,6 +83,13 @@ type wsServerFrame struct {
 	MD5                  string `json:"md5"`
 	Payload              any    `json:"payload"`
 	Headers              any    `json:"headers"`
+}
+
+type wsScheduleInactivePayload struct {
+	Text           string `json:"text"`
+	Code           int    `json:"code"`
+	ConnectionMode string `json:"connection_mode"`
+	Error          string `json:"error"`
 }
 
 func newReportTransport(a *Agent) *reportTransport {
@@ -231,10 +251,17 @@ func (r *reportTransport) run(ctx context.Context) {
 		}
 		conn, headers, started, received, err := r.dial(ctx)
 		if err != nil {
-			if handshakeErr := (*wsHandshakeError)(nil); errors.As(err, &handshakeErr) && isAuthConfigHTTPStatus(handshakeErr.StatusCode) {
-				r.delayProtocol(fmt.Sprintf("WSS handshake http=%d", handshakeErr.StatusCode))
-				backoff = wssNetworkMinRetry
-				continue
+			if handshakeErr := (*wsHandshakeError)(nil); errors.As(err, &handshakeErr) {
+				if reason, ok := wssScheduleInactiveFromHandshake(handshakeErr); ok {
+					r.agent.disableWSSRuntime(reason)
+					backoff = wssNetworkMinRetry
+					continue
+				}
+				if isAuthConfigHTTPStatus(handshakeErr.StatusCode) {
+					r.delayProtocol(fmt.Sprintf("WSS handshake http=%d", handshakeErr.StatusCode))
+					backoff = wssNetworkMinRetry
+					continue
+				}
 			}
 			if !r.waitNetworkRetry(ctx, err, backoff) {
 				return
@@ -348,6 +375,11 @@ func (r *reportTransport) readLoop(ctx context.Context, conn *webSocketConn) err
 			}
 		case "error":
 			reason := firstNonEmpty(frame.Error, "server_error")
+			if scheduleReason, ok := wssScheduleInactiveFromFrame(frame); ok {
+				r.agent.log.info("WSS schedule inactive ts=%d reason=%s", frame.TS, scheduleReason)
+				r.agent.disableWSSRuntime(scheduleReason)
+				return &wsScheduleInactiveError{reason: scheduleReason}
+			}
 			r.agent.log.info("WSS error ts=%d code=%d error=%s", frame.TS, frame.Code, reason)
 			return &wsProtocolDelayError{reason: fmt.Sprintf("server error code=%d error=%s", frame.Code, reason)}
 		case "config", "remote_config":
@@ -621,6 +653,12 @@ func (r *reportTransport) handleConnectionError(ctx context.Context, err error, 
 	if isContextDone(ctx) {
 		return false
 	}
+	var closeErr *wsCloseError
+	if errors.As(err, &closeErr) && closeErr.Code == 1013 && isWSSScheduleInactiveReason(closeErr.Reason) {
+		r.agent.log.info("WSS schedule inactive close reason=%s", closeErr.Reason)
+		r.agent.disableWSSRuntime(closeErr.Reason)
+		return false
+	}
 	if r.isStopped() || !r.agent.usesWSS() {
 		return false
 	}
@@ -630,7 +668,6 @@ func (r *reportTransport) handleConnectionError(ctx context.Context, err error, 
 		*backoff = wssNetworkMinRetry
 		return true
 	}
-	var closeErr *wsCloseError
 	if errors.As(err, &closeErr) && closeErr.Code == 1008 {
 		reason := fmt.Sprintf("WSS close code=1008 reason=%s", closeErr.Reason)
 		r.agent.log.info("WSS error %s", reason)
@@ -661,6 +698,37 @@ func (r *reportTransport) calibrateHandshakeDate(headers http.Header, started, r
 
 func isAuthConfigHTTPStatus(statusCode int) bool {
 	return statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden || statusCode == http.StatusNotFound
+}
+
+func isWSSScheduleInactiveReason(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	return reason == agentWSSScheduleInactive || reason == agentWSSScheduleEmpty
+}
+
+func wssScheduleInactiveFromHandshake(err *wsHandshakeError) (string, bool) {
+	if err == nil || err.StatusCode != http.StatusConflict {
+		return "", false
+	}
+	var payload wsScheduleInactivePayload
+	if json.Unmarshal([]byte(err.Body), &payload) != nil {
+		return "", false
+	}
+	reason := firstNonEmpty(payload.Text, payload.Error)
+	if !isWSSScheduleInactiveReason(reason) {
+		return "", false
+	}
+	return reason, true
+}
+
+func wssScheduleInactiveFromFrame(frame wsServerFrame) (string, bool) {
+	if frame.Code != http.StatusConflict {
+		return "", false
+	}
+	reason := firstNonEmpty(frame.Text, frame.Error)
+	if !isWSSScheduleInactiveReason(reason) {
+		return "", false
+	}
+	return reason, true
 }
 
 func nextWSSBackoff(current time.Duration) time.Duration {

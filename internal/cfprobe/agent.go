@@ -49,6 +49,9 @@ type Agent struct {
 	updateMu                 sync.Mutex
 	reporter                 *reportTransport
 	wake                     chan struct{}
+	wssRuntimeMu             sync.Mutex
+	wssRuntimeDisabledAt     time.Time
+	wssRuntimeDisabledReason string
 }
 
 const (
@@ -57,6 +60,12 @@ const (
 	metricsProbeWindowSampleCount = 6
 	metricsProbeSampleCount       = 1
 	configStateReportInterval     = time.Minute
+	agentWSSModeHeader            = "X-Agent-Wss-Mode"
+	agentWSSReasonHeader          = "X-Agent-Wss-Reason"
+	agentWSSModeActive            = "active"
+	agentWSSModeInactive          = "inactive"
+	agentWSSScheduleInactive      = "wss_schedule_inactive"
+	agentWSSScheduleEmpty         = "wss_schedule_empty"
 )
 
 type timedProbeResult struct {
@@ -252,12 +261,84 @@ func (a *Agent) currentWSSReportInterval() time.Duration {
 	return reportInterval
 }
 
-func (a *Agent) usesWSS() bool {
+func (a *Agent) persistentUsesWSS() bool {
 	mode, err := normalizeConnectionMode(a.cfg.ConnectionMode)
 	if err != nil {
 		mode = connectionModeAuto
 	}
 	return mode != connectionModeHTTP
+}
+
+func (a *Agent) wssRuntimeDisabled() (bool, string) {
+	if a == nil {
+		return false, ""
+	}
+	a.wssRuntimeMu.Lock()
+	defer a.wssRuntimeMu.Unlock()
+	return !a.wssRuntimeDisabledAt.IsZero(), a.wssRuntimeDisabledReason
+}
+
+func (a *Agent) usesWSS() bool {
+	if !a.persistentUsesWSS() {
+		return false
+	}
+	disabled, _ := a.wssRuntimeDisabled()
+	return !disabled
+}
+
+func (a *Agent) disableWSSRuntime(reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = agentWSSScheduleInactive
+	}
+	now := time.Now()
+	a.wssRuntimeMu.Lock()
+	alreadyDisabled := !a.wssRuntimeDisabledAt.IsZero() && a.wssRuntimeDisabledReason == reason
+	if alreadyDisabled {
+		a.wssRuntimeMu.Unlock()
+		return
+	}
+	a.wssRuntimeDisabledAt = now
+	a.wssRuntimeDisabledReason = reason
+	a.wssRuntimeMu.Unlock()
+	a.log.info("WSS temporarily disabled reason=%s; using POST report", reason)
+	if a.reporter != nil {
+		a.reporter.stop(reason)
+	}
+	a.wakeTick()
+}
+
+func (a *Agent) clearWSSRuntimeDisabled(reason string) {
+	a.wssRuntimeMu.Lock()
+	wasDisabled := !a.wssRuntimeDisabledAt.IsZero()
+	a.wssRuntimeDisabledAt = time.Time{}
+	a.wssRuntimeDisabledReason = ""
+	a.wssRuntimeMu.Unlock()
+	if !wasDisabled {
+		return
+	}
+	if reason == "" {
+		reason = "server_active"
+	}
+	a.log.info("WSS temporary disable cleared reason=%s", reason)
+	a.syncReportTransport()
+	a.wakeTick()
+}
+
+func (a *Agent) handleWSSRuntimeHeaders(headers http.Header) {
+	if headers == nil {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(headers.Get(agentWSSModeHeader)))
+	reason := strings.ToLower(strings.TrimSpace(headers.Get(agentWSSReasonHeader)))
+	switch mode {
+	case agentWSSModeActive:
+		a.clearWSSRuntimeDisabled(reason)
+	case agentWSSModeInactive:
+		if reason == agentWSSScheduleInactive || reason == agentWSSScheduleEmpty {
+			a.disableWSSRuntime(reason)
+		}
+	}
 }
 
 func (a *Agent) tick() {
@@ -570,6 +651,7 @@ func (a *Agent) handleTimedReportResponse(statusCode int, respBody []byte, heade
 	if statusCode < 200 || statusCode >= 300 {
 		return
 	}
+	a.handleWSSRuntimeHeaders(headers)
 	if dateTime, ok := responseDateTime(headers); ok {
 		snapshot, updated := a.clock.updateDate(dateTime, received.Sub(started), received)
 		if updated {

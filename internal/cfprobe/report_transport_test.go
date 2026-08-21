@@ -341,6 +341,73 @@ func TestReportTransportProtocolDelayPausesPostFallback(t *testing.T) {
 	}
 }
 
+func TestAgentWSSRuntimeHeadersTemporarilyDisableAndRestoreWSS(t *testing.T) {
+	agent := Agent{
+		cfg: Config{
+			ReportInterval:  60,
+			ConnectionMode:  connectionModeAuto,
+			CollectInterval: 2,
+		},
+		log:  newLogger(false),
+		wake: make(chan struct{}, 1),
+	}
+
+	agent.handleWSSRuntimeHeaders(http.Header{
+		"X-Agent-Wss-Mode":   []string{"inactive"},
+		"X-Agent-Wss-Reason": []string{"wss_schedule_inactive"},
+	})
+	if agent.usesWSS() {
+		t.Fatal("usesWSS() = true after inactive schedule header")
+	}
+	if agent.cfg.ConnectionMode != connectionModeAuto {
+		t.Fatalf("ConnectionMode = %q, want auto", agent.cfg.ConnectionMode)
+	}
+	if got := agent.currentWSSReportInterval(); got != time.Minute {
+		t.Fatalf("currentWSSReportInterval() = %s, want 1m while runtime disabled", got)
+	}
+	select {
+	case <-agent.wake:
+	default:
+		t.Fatal("inactive schedule header did not wake agent loop")
+	}
+
+	agent.handleWSSRuntimeHeaders(http.Header{
+		"X-Agent-Wss-Mode":   []string{"inactive"},
+		"X-Agent-Wss-Reason": []string{"wss_schedule_inactive"},
+	})
+	select {
+	case <-agent.wake:
+		t.Fatal("duplicate inactive schedule header woke agent loop")
+	default:
+	}
+
+	agent.handleWSSRuntimeHeaders(http.Header{
+		"X-Agent-Wss-Mode":   []string{"active"},
+		"X-Agent-Wss-Reason": []string{"wss_schedule_active"},
+	})
+	if !agent.usesWSS() {
+		t.Fatal("usesWSS() = false after active schedule header")
+	}
+}
+
+func TestWSSScheduleInactiveHandshakeIsSoftReject(t *testing.T) {
+	reason, ok := wssScheduleInactiveFromHandshake(&wsHandshakeError{
+		StatusCode: http.StatusConflict,
+		Body:       `{"text":"wss_schedule_inactive","connection_mode":"http"}`,
+	})
+	if !ok || reason != agentWSSScheduleInactive {
+		t.Fatalf("wssScheduleInactiveFromHandshake() = %q, %v", reason, ok)
+	}
+
+	_, ok = wssScheduleInactiveFromHandshake(&wsHandshakeError{
+		StatusCode: http.StatusForbidden,
+		Body:       `{"error":"Forbidden","code":403}`,
+	})
+	if ok {
+		t.Fatal("403 must not be treated as schedule inactive")
+	}
+}
+
 func TestReportTransportUsesServerSuggestedWSSReportInterval(t *testing.T) {
 	agent := Agent{
 		cfg: Config{ReportInterval: 60},
