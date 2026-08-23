@@ -91,7 +91,7 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 | `-ct=HOST` | 电信测试节点，可写 `host` 或 `host:port` | 空 |
 | `-cu=HOST` | 联通测试节点，可写 `host` 或 `host:port` | 空 |
 | `-cm=HOST` | 移动测试节点，可写 `host` 或 `host:port` | 空 |
-| `-bd=HOST` | 百度测试节点，可写 `host` 或 `host:port` | 空 |
+| `-bgp=HOST` | BGP 节点测试节点，可写 `host` 或 `host:port` | 空 |
 | `-interface=IFACES` | 指定统计网卡，多个用英文逗号分隔 | 自动汇总 |
 | `-reset_day=N` | 每月流量重置日，`1-31`；`0` 表示不重置 | `1` |
 | `-connection_mode=auto\|http` | 连接模式；`auto` 优先 WSS 实时上报并在不可用时 POST 兜底，`http` 仅按上报间隔 POST | `auto` |
@@ -393,7 +393,7 @@ Agent 只使用 Worker 成功 HTTP 响应里的 `Date` 头做时间校准，包�
 | `udp_conn` | string | count | UDP 连接或端点数量 |
 | `ip_v4` | string | IP/`0` | Cloudflare trace 获取到的 IPv4 |
 | `ip_v6` | string | IP/`0` | Cloudflare trace 获取到的 IPv6 |
-| `ping_ct` / `ping_cu` / `ping_cm` / `ping_bd` | string/boolean | ms/`false`/`"null"` | 电信、联通、移动、百度探测 RTT；节点未配置为 `false`，探测失败为字符串 `"null"` |
+| `ping_ct` / `ping_cu` / `ping_cm` / `ping_bgp` | string/boolean | ms/`false`/`"null"` | 电信、联通、移动、BGP 节点探测 RTT；节点未配置为 `false`，探测失败为字符串 `"null"` |
 | `loss_ct` / `loss_cu` / `loss_cm` / `loss_bd` | string/boolean | `%`/`false` | 对应探测丢包率；节点未配置为 `false` |
 
 `disk` 字段：
