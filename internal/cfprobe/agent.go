@@ -21,6 +21,7 @@ import (
 
 type Agent struct {
 	cfg     Config
+	cfgMu   sync.RWMutex
 	paths   Paths
 	log     logger
 	version string
@@ -49,6 +50,7 @@ type Agent struct {
 	updateMu                 sync.Mutex
 	reporter                 *reportTransport
 	wake                     chan struct{}
+	remoteConfig             chan remoteConfigRequest
 	wssRuntimeMu             sync.Mutex
 	wssRuntimeDisabledAt     time.Time
 	wssRuntimeDisabledReason string
@@ -81,6 +83,13 @@ type rollingProbeHistory struct {
 type metricSample struct {
 	at      time.Time
 	metrics map[string]any
+}
+
+type remoteConfigRequest struct {
+	body            []byte
+	headers         http.Header
+	allowMissingMD5 bool
+	done            chan error
 }
 
 func (h *rollingProbeHistory) add(now time.Time, target string, result ProbeResult) {
@@ -158,14 +167,15 @@ func Run(configFile string, debug bool, version string) error {
 	defer stop()
 
 	a := &Agent{
-		cfg:      cfg,
-		paths:    paths,
-		log:      newLogger(debug),
-		version:  version,
-		ctx:      ctx,
-		prevNet:  readNetBytes(cfg.Interface),
-		prevTime: time.Now(),
-		wake:     make(chan struct{}, 1),
+		cfg:          cfg,
+		paths:        paths,
+		log:          newLogger(debug),
+		version:      version,
+		ctx:          ctx,
+		prevNet:      readNetBytes(cfg.Interface),
+		prevTime:     time.Now(),
+		wake:         make(chan struct{}, 1),
+		remoteConfig: make(chan remoteConfigRequest, 4),
 	}
 	a.reporter = newReportTransport(a)
 	a.basic = collectBasicStats()
@@ -203,6 +213,10 @@ func (a *Agent) loop(ctx context.Context) error {
 		case <-a.wake:
 			a.tick()
 			resetTimer(timer, a.tickInterval())
+		case req := <-a.remoteConfig:
+			err := a.applyRemoteConfigWithOptions(req.body, req.headers, req.allowMissingMD5)
+			req.done <- err
+			resetTimer(timer, a.tickInterval())
 		}
 	}
 }
@@ -231,8 +245,9 @@ func (a *Agent) wakeTick() {
 }
 
 func (a *Agent) tickInterval() time.Duration {
-	active := a.currentWSSReportInterval()
-	if collect := a.effectiveCollectInterval(); collect > 0 {
+	cfg := a.configSnapshot()
+	active := a.currentWSSReportIntervalForConfig(cfg)
+	if collect := effectiveCollectInterval(cfg); collect > 0 {
 		active = durationGCD(active, collect)
 	}
 	if active <= 0 {
@@ -242,7 +257,11 @@ func (a *Agent) tickInterval() time.Duration {
 }
 
 func (a *Agent) effectiveCollectInterval() time.Duration {
-	collect := time.Duration(a.cfg.CollectInterval) * time.Second
+	return effectiveCollectInterval(a.configSnapshot())
+}
+
+func effectiveCollectInterval(cfg Config) time.Duration {
+	collect := time.Duration(cfg.CollectInterval) * time.Second
 	if collect < 0 {
 		collect = 0
 	}
@@ -250,11 +269,15 @@ func (a *Agent) effectiveCollectInterval() time.Duration {
 }
 
 func (a *Agent) currentWSSReportInterval() time.Duration {
-	if a.reporter != nil && a.usesWSS() {
+	return a.currentWSSReportIntervalForConfig(a.configSnapshot())
+}
+
+func (a *Agent) currentWSSReportIntervalForConfig(cfg Config) time.Duration {
+	if a.reporter != nil && a.usesWSSConfig(cfg) {
 		fallback := time.Duration(defaultWSSReportIntervalSec) * time.Second
 		return a.reporter.reportInterval(fallback)
 	}
-	reportInterval := time.Duration(a.cfg.ReportInterval) * time.Second
+	reportInterval := time.Duration(cfg.ReportInterval) * time.Second
 	if reportInterval < time.Second {
 		return time.Duration(defaultReportIntervalSec) * time.Second
 	}
@@ -262,7 +285,11 @@ func (a *Agent) currentWSSReportInterval() time.Duration {
 }
 
 func (a *Agent) persistentUsesWSS() bool {
-	mode, err := normalizeConnectionMode(a.cfg.ConnectionMode)
+	return persistentUsesWSSConfig(a.configSnapshot())
+}
+
+func persistentUsesWSSConfig(cfg Config) bool {
+	mode, err := normalizeConnectionMode(cfg.ConnectionMode)
 	if err != nil {
 		mode = connectionModeAuto
 	}
@@ -279,11 +306,30 @@ func (a *Agent) wssRuntimeDisabled() (bool, string) {
 }
 
 func (a *Agent) usesWSS() bool {
-	if !a.persistentUsesWSS() {
+	return a.usesWSSConfig(a.configSnapshot())
+}
+
+func (a *Agent) usesWSSConfig(cfg Config) bool {
+	if !persistentUsesWSSConfig(cfg) {
 		return false
 	}
 	disabled, _ := a.wssRuntimeDisabled()
 	return !disabled
+}
+
+func (a *Agent) configSnapshot() Config {
+	if a == nil {
+		return Config{}
+	}
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg
+}
+
+func (a *Agent) setConfig(cfg Config) {
+	a.cfgMu.Lock()
+	a.cfg = cfg
+	a.cfgMu.Unlock()
 }
 
 func (a *Agent) disableWSSRuntime(reason string) {
@@ -343,13 +389,14 @@ func (a *Agent) handleWSSRuntimeHeaders(headers http.Header) {
 
 func (a *Agent) tick() {
 	now := time.Now()
-	reportInterval := time.Duration(a.cfg.ReportInterval) * time.Second
+	cfg := a.configSnapshot()
+	reportInterval := time.Duration(cfg.ReportInterval) * time.Second
 	if reportInterval < time.Second {
 		reportInterval = time.Duration(defaultReportIntervalSec) * time.Second
 	}
-	wssEnabled := a.usesWSS()
+	wssEnabled := a.usesWSSConfig(cfg)
 	wssConnected := wssEnabled && a.reporter != nil && a.reporter.connected()
-	shouldWSSReport := wssConnected && (a.lastReport.IsZero() || now.Sub(a.lastReport) >= a.currentWSSReportInterval())
+	shouldWSSReport := wssConnected && (a.lastReport.IsZero() || now.Sub(a.lastReport) >= a.currentWSSReportIntervalForConfig(cfg))
 	postDue := !wssConnected && (a.lastPost.IsZero() || now.Sub(a.lastPost) >= reportInterval)
 	postAllowed := !wssEnabled || a.reporter == nil || a.reporter.postFallbackAllowed()
 	if postDue && !postAllowed && wssEnabled && a.reporter != nil {
@@ -357,7 +404,7 @@ func (a *Agent) tick() {
 	}
 	shouldPostReport := postDue && postAllowed
 	shouldSample := false
-	if collectInterval := a.effectiveCollectInterval(); collectInterval > 0 {
+	if collectInterval := effectiveCollectInterval(cfg); collectInterval > 0 {
 		shouldSample = a.lastSample.IsZero() || now.Sub(a.lastSample) >= collectInterval
 	}
 	if !shouldWSSReport && !shouldPostReport && !shouldSample {
@@ -371,10 +418,10 @@ func (a *Agent) tick() {
 	} else {
 		a.refreshRealtimeBasicStats()
 	}
-	netNow := readNetBytes(a.cfg.Interface)
+	netNow := readNetBytes(cfg.Interface)
 	dt := now.Sub(a.prevTime).Seconds()
 	if dt <= 0 {
-		dt = float64(a.cfg.ReportInterval)
+		dt = float64(cfg.ReportInterval)
 	}
 	rxDelta := uint64(0)
 	txDelta := uint64(0)
@@ -395,11 +442,11 @@ func (a *Agent) tick() {
 	}
 
 	if fullDue {
-		a.monthlyRX, a.monthlyTX = calcMonthlyTraffic(a.paths.TrafficFile, netNow, a.cfg.ResetDay, a.cfg.Interface)
+		a.monthlyRX, a.monthlyTX = calcMonthlyTraffic(a.paths.TrafficFile, netNow, cfg.ResetDay, cfg.Interface)
 		a.diskIO = a.sampleDiskIO(now)
 		a.fullAt = now
 	}
-	m := a.buildMetrics(cpu, netNow, rxSpeed, txSpeed, a.monthlyRX, a.monthlyTX, a.diskIO)
+	m := a.buildMetrics(cfg, cpu, netNow, rxSpeed, txSpeed, a.monthlyRX, a.monthlyTX, a.diskIO)
 	if shouldSample {
 		a.samples = append(a.samples, metricSample{
 			at:      now,
@@ -408,7 +455,7 @@ func (a *Agent) tick() {
 		a.lastSample = now
 	}
 	if shouldWSSReport || shouldPostReport {
-		if a.sendReport(m, shouldWSSReport, shouldPostReport) {
+		if a.sendReport(cfg, m, shouldWSSReport, shouldPostReport) {
 			if shouldWSSReport {
 				a.lastReport = now
 				a.lastPost = now
@@ -445,7 +492,7 @@ func (a *Agent) sampleDiskIO(now time.Time) DiskIOStats {
 	return stats
 }
 
-func (a *Agent) buildMetrics(cpu string, netNow NetBytes, rxSpeed, txSpeed, rxMonthly, txMonthly uint64, diskIO DiskIOStats) Metrics {
+func (a *Agent) buildMetrics(cfg Config, cpu string, netNow NetBytes, rxSpeed, txSpeed, rxMonthly, txMonthly uint64, diskIO DiskIOStats) Metrics {
 	a.mu.RLock()
 	probes := a.probes
 	a.mu.RUnlock()
@@ -478,14 +525,14 @@ func (a *Agent) buildMetrics(cpu string, netNow NetBytes, rxSpeed, txSpeed, rxMo
 		UDPConn:      intString(b.UDPConn),
 		IPv4:         firstNonEmpty(probes.IPv4, "0"),
 		IPv6:         firstNonEmpty(probes.IPv6, "0"),
-		PingCT:       probeRTTValue(a.cfg.CTNode, probes.CT),
-		PingCU:       probeRTTValue(a.cfg.CUNode, probes.CU),
-		PingCM:       probeRTTValue(a.cfg.CMNode, probes.CM),
-		PingBD:       probeRTTValue(a.cfg.BDNode, probes.BD),
-		LossCT:       probeLossValue(a.cfg.CTNode, probes.CT),
-		LossCU:       probeLossValue(a.cfg.CUNode, probes.CU),
-		LossCM:       probeLossValue(a.cfg.CMNode, probes.CM),
-		LossBD:       probeLossValue(a.cfg.BDNode, probes.BD),
+		PingCT:       probeRTTValue(cfg.CTNode, probes.CT),
+		PingCU:       probeRTTValue(cfg.CUNode, probes.CU),
+		PingCM:       probeRTTValue(cfg.CMNode, probes.CM),
+		PingBD:       probeRTTValue(cfg.BDNode, probes.BD),
+		LossCT:       probeLossValue(cfg.CTNode, probes.CT),
+		LossCU:       probeLossValue(cfg.CUNode, probes.CU),
+		LossCM:       probeLossValue(cfg.CMNode, probes.CM),
+		LossBD:       probeLossValue(cfg.BDNode, probes.BD),
 	}
 }
 
@@ -510,19 +557,20 @@ func probeLossValue(node string, r ProbeResult) any {
 }
 
 func (a *Agent) report(m Metrics) {
+	cfg := a.configSnapshot()
 	reportAt := time.Now()
-	body, sampleCount, err := a.buildReportBody(m, reportAt)
+	body, sampleCount, err := a.buildReportBodyForConfig(cfg, m, reportAt)
 	if err != nil {
 		a.log.warnf("marshal payload failed: %v", err)
 		return
 	}
 	a.logMetricsSummary(m)
-	_, _ = a.postReportBody(body, sampleCount, false)
+	_, _ = a.postReportBody(cfg, body, sampleCount, false)
 }
 
-func (a *Agent) sendReport(m Metrics, preferWSS, allowPOST bool) bool {
+func (a *Agent) sendReport(cfg Config, m Metrics, preferWSS, allowPOST bool) bool {
 	reportAt := time.Now()
-	body, sampleCount, err := a.buildReportBody(m, reportAt)
+	body, sampleCount, err := a.buildReportBodyForConfig(cfg, m, reportAt)
 	if err != nil {
 		a.log.warnf("marshal payload failed: %v", err)
 		return false
@@ -541,7 +589,7 @@ func (a *Agent) sendReport(m Metrics, preferWSS, allowPOST bool) bool {
 		a.reporter.logPostFallbackDelayed()
 		return false
 	}
-	statusCode, _ := a.postReportBody(body, sampleCount, preferWSS)
+	statusCode, _ := a.postReportBody(cfg, body, sampleCount, preferWSS)
 	if isAuthConfigHTTPStatus(statusCode) && a.reporter != nil {
 		a.reporter.delayProtocol(fmt.Sprintf("POST fallback http=%d", statusCode))
 	}
@@ -549,17 +597,21 @@ func (a *Agent) sendReport(m Metrics, preferWSS, allowPOST bool) bool {
 }
 
 func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, error) {
+	return a.buildReportBodyForConfig(a.configSnapshot(), m, reportAt)
+}
+
+func (a *Agent) buildReportBodyForConfig(cfg Config, m Metrics, reportAt time.Time) ([]byte, int, error) {
 	payload := map[string]any{
-		"id":               a.cfg.ServerID,
-		"secret":           a.cfg.Secret,
+		"id":               cfg.ServerID,
+		"secret":           cfg.Secret,
 		"time":             a.clock.snapshot(reportAt),
 		"metrics":          a.metricsForReport(m, reportAt),
-		"collect_interval": a.cfg.CollectInterval,
-		"report_interval":  a.cfg.ReportInterval,
+		"collect_interval": cfg.CollectInterval,
+		"report_interval":  cfg.ReportInterval,
 	}
-	if a.shouldReportConfigState(reportAt) {
+	if a.shouldReportConfigState(firstNonEmpty(cfg.ConfigMD5, "none"), reportAt) {
 		payload["config_schema"] = configSchemaVersion
-		payload["config_md5"] = firstNonEmpty(a.cfg.ConfigMD5, "none")
+		payload["config_md5"] = firstNonEmpty(cfg.ConfigMD5, "none")
 	}
 	if len(a.samples) > 0 {
 		payload["samples"] = a.samplesForReport()
@@ -571,8 +623,7 @@ func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, err
 	return body, len(a.samples), nil
 }
 
-func (a *Agent) shouldReportConfigState(reportAt time.Time) bool {
-	configMD5 := firstNonEmpty(a.cfg.ConfigMD5, "none")
+func (a *Agent) shouldReportConfigState(configMD5 string, reportAt time.Time) bool {
 	if a.lastConfigStateReportAt.IsZero() ||
 		configMD5 != a.lastConfigStateReportMD5 ||
 		reportAt.Sub(a.lastConfigStateReportAt) >= configStateReportInterval {
@@ -588,13 +639,13 @@ func (a *Agent) logMetricsSummary(m Metrics) {
 	a.log.debugf("metrics summary cpu=%s gpu_info=%s", m.CPU, string(gpuSummary))
 }
 
-func (a *Agent) postReportBody(body []byte, sampleCount int, fallback bool) (int, error) {
+func (a *Agent) postReportBody(cfg Config, body []byte, sampleCount int, fallback bool) (int, error) {
 	label := "report"
 	if fallback {
 		label = "POST fallback"
 	}
-	a.log.debugf("%s attempt url=%s payload_bytes=%d samples=%d", label, a.cfg.WorkerURL, len(body), sampleCount)
-	req, err := http.NewRequest(http.MethodPost, a.cfg.WorkerURL, bytes.NewReader(body))
+	a.log.debugf("%s attempt url=%s payload_bytes=%d samples=%d", label, cfg.WorkerURL, len(body), sampleCount)
+	req, err := http.NewRequest(http.MethodPost, cfg.WorkerURL, bytes.NewReader(body))
 	if err != nil {
 		a.log.warnf("create %s request failed: %v", label, err)
 		return 0, err
@@ -603,10 +654,10 @@ func (a *Agent) postReportBody(body []byte, sampleCount int, fallback bool) (int
 	a.setAgentHeaders(req)
 	req.Header.Set("X-Agent-Config-Schema", configSchemaVersion)
 	req.Header.Set("X-Agent-Version", a.version)
-	req.Header.Set("X-Agent-Config-Md5", firstNonEmpty(a.cfg.ConfigMD5, "none"))
+	req.Header.Set("X-Agent-Config-Md5", firstNonEmpty(cfg.ConfigMD5, "none"))
 
 	started := time.Now()
-	resp, err := sharedReportHTTPClient(8*time.Second, usePublicDNSResolver(a.cfg)).Do(req)
+	resp, err := sharedReportHTTPClient(8*time.Second, usePublicDNSResolver(cfg)).Do(req)
 	if err != nil {
 		a.log.warnf("%s failed: %v", label, err)
 		return 0, err
@@ -696,20 +747,21 @@ func (a *Agent) networkWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
+			cfg := a.configSnapshot()
 			snap := ProbeSnapshot{}
 			needUpdate := false
 			if lastIP.IsZero() || now.Sub(lastIP) >= 10*time.Minute {
-				usePublicDNS := usePublicDNSResolver(a.cfg)
+				usePublicDNS := usePublicDNSResolver(cfg)
 				snap.IPv4 = lookupPublicIP("tcp4", a.log, usePublicDNS)
 				snap.IPv6 = lookupPublicIP("tcp6", a.log, usePublicDNS)
 				lastIP = now
 				needUpdate = true
 			}
 			if lastProbe.IsZero() || now.Sub(lastProbe) >= metricsProbeInterval {
-				ctHistory.add(now, a.cfg.CTNode, measureProbe(a.cfg.CTNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
-				cuHistory.add(now, a.cfg.CUNode, measureProbe(a.cfg.CUNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
-				cmHistory.add(now, a.cfg.CMNode, measureProbe(a.cfg.CMNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
-				bdHistory.add(now, a.cfg.BDNode, measureProbe(a.cfg.BDNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				ctHistory.add(now, cfg.CTNode, measureProbe(cfg.CTNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				cuHistory.add(now, cfg.CUNode, measureProbe(cfg.CUNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				cmHistory.add(now, cfg.CMNode, measureProbe(cfg.CMNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				bdHistory.add(now, cfg.BDNode, measureProbe(cfg.BDNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
 				snap.CT = ctHistory.snapshot(now)
 				snap.CU = cuHistory.snapshot(now)
 				snap.CM = cmHistory.snapshot(now)
@@ -751,7 +803,26 @@ func (a *Agent) applyRemoteConfig(body []byte, headers http.Header) error {
 }
 
 func (a *Agent) applyWSSRemoteConfig(body []byte, headers http.Header) error {
-	return a.applyRemoteConfigWithOptions(body, headers, true)
+	if a == nil || a.remoteConfig == nil || a.ctx == nil {
+		return a.applyRemoteConfigWithOptions(body, headers, true)
+	}
+	req := remoteConfigRequest{
+		body:            append([]byte(nil), body...),
+		headers:         headers.Clone(),
+		allowMissingMD5: true,
+		done:            make(chan error, 1),
+	}
+	select {
+	case a.remoteConfig <- req:
+	case <-a.ctx.Done():
+		return a.ctx.Err()
+	}
+	select {
+	case err := <-req.done:
+		return err
+	case <-a.ctx.Done():
+		return a.ctx.Err()
+	}
 }
 
 func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, allowMissingMD5 bool) error {
@@ -799,14 +870,15 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	}
 	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("wss_report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface") || values.Has("connection_mode")
 	hasCorrection := values.Has("rx_correction") || values.Has("tx_correction")
+	cfg := a.configSnapshot()
 	if !hasConfig {
 		if hasCorrection {
 			rx := values.Get("rx_correction")
 			tx := values.Get("tx_correction")
-			if err := applyTrafficCorrection(a.paths.TrafficFile, readNetBytes(a.cfg.Interface), a.cfg.Interface, rx, tx); err != nil {
+			if err := applyTrafficCorrection(a.paths.TrafficFile, readNetBytes(cfg.Interface), cfg.Interface, rx, tx); err != nil {
 				return err
 			}
-			_ = a.sendCorrectionConfirm(rx, tx)
+			_ = a.sendCorrectionConfirm(cfg, rx, tx)
 			return nil
 		}
 		if values.Has("update") {
@@ -858,28 +930,30 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	}
 	shouldApply := false
 	if hasRemoteMD5 {
-		shouldApply = newMD5 != a.cfg.ConfigMD5
+		shouldApply = newMD5 != cfg.ConfigMD5
 	} else {
-		shouldApply = a.remoteConfigDiffers(values, effectiveCollect, report, reset, iface, connectionMode)
+		shouldApply = remoteConfigDiffers(cfg, values, effectiveCollect, report, reset, iface, connectionMode)
 	}
 	if shouldApply {
-		a.cfg.CollectInterval = effectiveCollect
-		a.cfg.ReportInterval = report
-		a.cfg.ResetDay = reset
-		a.cfg.CTNode = values.Get("custom_ct")
-		a.cfg.CUNode = values.Get("custom_cu")
-		a.cfg.CMNode = values.Get("custom_cm")
-		a.cfg.BDNode = values.Get("custom_bd")
-		a.cfg.Interface = iface
-		a.cfg.ConnectionMode = connectionMode
+		nextCfg := cfg
+		nextCfg.CollectInterval = effectiveCollect
+		nextCfg.ReportInterval = report
+		nextCfg.ResetDay = reset
+		nextCfg.CTNode = values.Get("custom_ct")
+		nextCfg.CUNode = values.Get("custom_cu")
+		nextCfg.CMNode = values.Get("custom_cm")
+		nextCfg.BDNode = values.Get("custom_bd")
+		nextCfg.Interface = iface
+		nextCfg.ConnectionMode = connectionMode
 		if hasRemoteMD5 {
-			a.cfg.ConfigMD5 = newMD5
+			nextCfg.ConfigMD5 = newMD5
 		}
-		if err := writeConfig(a.paths.ConfigFile, a.cfg); err != nil {
+		if err := writeConfig(a.paths.ConfigFile, nextCfg); err != nil {
 			return err
 		}
+		a.setConfig(nextCfg)
 		now := time.Now()
-		a.prevNet = readNetBytes(a.cfg.Interface)
+		a.prevNet = readNetBytes(nextCfg.Interface)
 		a.prevTime = now
 		a.prevDisk = DiskIOCounters{}
 		a.prevDiskAt = time.Time{}
@@ -898,19 +972,19 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		}
 		a.syncReportTransport()
 		a.wakeTick()
-		a.log.info("dynamic configuration applied md5=%s connection_mode=%s interface=%s", firstNonEmpty(a.cfg.ConfigMD5, "none"), a.cfg.ConnectionMode, firstNonEmpty(iface, "auto"))
+		a.log.info("dynamic configuration applied md5=%s connection_mode=%s interface=%s", firstNonEmpty(nextCfg.ConfigMD5, "none"), nextCfg.ConnectionMode, firstNonEmpty(iface, "auto"))
+		cfg = nextCfg
 	}
 	if hasCorrection {
 		rx := values.Get("rx_correction")
 		tx := values.Get("tx_correction")
-		if err := applyTrafficCorrection(a.paths.TrafficFile, readNetBytes(a.cfg.Interface), a.cfg.Interface, rx, tx); err != nil {
+		if err := applyTrafficCorrection(a.paths.TrafficFile, readNetBytes(cfg.Interface), cfg.Interface, rx, tx); err != nil {
 			return err
 		}
-		_ = a.sendCorrectionConfirm(rx, tx)
+		_ = a.sendCorrectionConfirm(cfg, rx, tx)
 	}
 	return nil
 }
-
 func validConfigMD5(value string) bool {
 	return len(value) == 32 && !strings.ContainsFunc(value, func(r rune) bool {
 		return !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f')
@@ -933,18 +1007,17 @@ func (a *Agent) syncReportTransport() {
 	}
 }
 
-func (a *Agent) remoteConfigDiffers(values url.Values, collect, report, reset int, iface, connectionMode string) bool {
-	return a.cfg.CollectInterval != collect ||
-		a.cfg.ReportInterval != report ||
-		a.cfg.ResetDay != reset ||
-		a.cfg.CTNode != values.Get("custom_ct") ||
-		a.cfg.CUNode != values.Get("custom_cu") ||
-		a.cfg.CMNode != values.Get("custom_cm") ||
-		a.cfg.BDNode != values.Get("custom_bd") ||
-		a.cfg.Interface != iface ||
-		a.cfg.ConnectionMode != connectionMode
+func remoteConfigDiffers(cfg Config, values url.Values, collect, report, reset int, iface, connectionMode string) bool {
+	return cfg.CollectInterval != collect ||
+		cfg.ReportInterval != report ||
+		cfg.ResetDay != reset ||
+		cfg.CTNode != values.Get("custom_ct") ||
+		cfg.CUNode != values.Get("custom_cu") ||
+		cfg.CMNode != values.Get("custom_cm") ||
+		cfg.BDNode != values.Get("custom_bd") ||
+		cfg.Interface != iface ||
+		cfg.ConnectionMode != connectionMode
 }
-
 func inIntSet(v int, allowed ...int) bool {
 	for _, item := range allowed {
 		if v == item {
@@ -954,7 +1027,12 @@ func inIntSet(v int, allowed ...int) bool {
 	return false
 }
 
-func (a *Agent) sendCorrectionConfirm(rx, tx string) error {
+func (a *Agent) setAgentHeaders(req *http.Request) {
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", "cfsm")
+}
+
+func (a *Agent) sendCorrectionConfirm(cfg Config, rx, tx string) error {
 	if _, err := parseTrafficCorrectionGB(rx); err != nil {
 		return err
 	}
@@ -962,13 +1040,13 @@ func (a *Agent) sendCorrectionConfirm(rx, tx string) error {
 		return err
 	}
 	payload := map[string]any{
-		"id":            a.cfg.ServerID,
-		"secret":        a.cfg.Secret,
+		"id":            cfg.ServerID,
+		"secret":        cfg.Secret,
 		"rx_correction": parseFloatDefault(rx, 0),
 		"tx_correction": parseFloatDefault(tx, 0),
 	}
 	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest(http.MethodPost, a.cfg.WorkerURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, cfg.WorkerURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -987,12 +1065,6 @@ func (a *Agent) sendCorrectionConfirm(rx, tx string) error {
 	a.log.info("traffic correction confirm sent rx=%sGB tx=%sGB", firstNonEmpty(rx, "0"), firstNonEmpty(tx, "0"))
 	return nil
 }
-
-func (a *Agent) setAgentHeaders(req *http.Request) {
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("User-Agent", "cfsm")
-}
-
 func parseFloatDefault(raw string, def float64) float64 {
 	if strings.TrimSpace(raw) == "" {
 		return def

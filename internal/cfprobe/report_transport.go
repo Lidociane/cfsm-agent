@@ -95,7 +95,8 @@ type wsScheduleInactivePayload struct {
 }
 
 func newReportTransport(a *Agent) *reportTransport {
-	wsURL, err := reportWebSocketURL(a.cfg.WorkerURL)
+	cfg := a.configSnapshot()
+	wsURL, err := reportWebSocketURL(cfg.WorkerURL)
 	if err != nil {
 		a.log.info("WSS retry delayed reason=invalid_url error=%v", err)
 	}
@@ -347,7 +348,8 @@ func (r *reportTransport) clearRestartRequest() {
 }
 
 func (r *reportTransport) dial(ctx context.Context) (*webSocketConn, http.Header, time.Time, time.Time, error) {
-	configMD5 := firstNonEmpty(r.agent.cfg.ConfigMD5, "none")
+	cfg := r.agent.configSnapshot()
+	configMD5 := firstNonEmpty(cfg.ConfigMD5, "none")
 	wsURL, err := reportWebSocketURLWithConfig(r.wsURL, configSchemaVersion, configMD5)
 	if err != nil {
 		wsURL = r.wsURL
@@ -358,7 +360,7 @@ func (r *reportTransport) dial(ctx context.Context) (*webSocketConn, http.Header
 	headers.Set("X-Agent-Config-Schema", configSchemaVersion)
 	headers.Set("X-Agent-Version", r.agent.version)
 	headers.Set("X-Agent-Config-Md5", configMD5)
-	return dialReportWebSocket(ctx, wsURL, headers, usePublicDNSResolver(r.agent.cfg), wssHandshakeTimeout)
+	return dialReportWebSocket(ctx, wsURL, headers, usePublicDNSResolver(cfg), wssHandshakeTimeout)
 }
 
 func (r *reportTransport) waitHello(conn *webSocketConn) (wsHelloFrame, error) {

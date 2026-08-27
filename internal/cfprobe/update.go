@@ -2,6 +2,8 @@ package cfprobe
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,11 +20,12 @@ import (
 )
 
 const (
-	autoUpdateCheckInterval = 6 * time.Hour
-	autoUpdateLockTTL       = 30 * time.Minute
-	defaultUpdateRepo       = "huilang-me/cfsm-agent"
-	githubAPIBaseURL        = "https://api.github.com"
-	snapshotVersionPrefix   = "Snapshot-"
+	autoUpdateCheckInterval  = 6 * time.Hour
+	autoUpdateLockTTL        = 30 * time.Minute
+	defaultUpdateRepo        = "huilang-me/cfsm-agent"
+	githubAPIBaseURL         = "https://api.github.com"
+	snapshotVersionPrefix    = "Snapshot-"
+	updateChecksumsAssetName = "checksums.txt"
 )
 
 type githubRelease struct {
@@ -69,9 +72,10 @@ func (a *Agent) autoUpdateWorker(ctx context.Context) {
 }
 
 func (a *Agent) checkAndScheduleAgentUpdate(reason string) {
+	cfg := a.configSnapshot()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	candidate, ok, err := checkLatestUpdate(ctx, a.version, usePublicDNSResolver(a.cfg))
+	candidate, ok, err := checkLatestUpdate(ctx, a.version, usePublicDNSResolver(cfg))
 	if err != nil {
 		a.log.info("auto update check failed reason=%s: %v", reason, err)
 		return
@@ -81,7 +85,7 @@ func (a *Agent) checkAndScheduleAgentUpdate(reason string) {
 		return
 	}
 
-	a.scheduleAgentUpdate(candidate, reason)
+	a.scheduleAgentUpdate(candidate, reason, cfg)
 }
 
 func checkLatestUpdate(ctx context.Context, currentVersion string, usePublicDNS bool) (updateCandidate, bool, error) {
@@ -221,7 +225,7 @@ func expectedUpdateAssetName(goos, goarch string) string {
 	return name
 }
 
-func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string) {
+func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string, cfg Config) {
 	a.updateMu.Lock()
 	defer a.updateMu.Unlock()
 
@@ -235,7 +239,7 @@ func (a *Agent) scheduleAgentUpdate(candidate updateCandidate, reason string) {
 		}
 	}
 
-	binPath, err := fetchUpdateBinary(a.paths.ConfigDir, candidate, a.cfg.UpdateProxy, usePublicDNSResolver(a.cfg))
+	binPath, err := fetchUpdateBinary(a.paths.ConfigDir, candidate, cfg.UpdateProxy, usePublicDNSResolver(cfg))
 	if err != nil {
 		a.log.info("auto update download failed target=%s: %v", candidate.TagName, err)
 		return
@@ -279,8 +283,21 @@ func fetchUpdateBinary(configDir string, candidate updateCandidate, proxy string
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := downloadToFile(ctx, newUpdateHTTPClient(5*time.Minute, usePublicDNS), rawURL, dest); err != nil {
+	client := newUpdateHTTPClient(5*time.Minute, usePublicDNS)
+	checksums, checksumErr := downloadUpdateChecksums(ctx, client, candidate.TagName, proxy)
+	if err := downloadToFile(ctx, client, rawURL, dest); err != nil {
 		return "", err
+	}
+	if checksumErr == nil {
+		expected, ok := checksumForAsset(checksums, candidate.AssetName)
+		if !ok {
+			_ = os.Remove(dest)
+			return "", fmt.Errorf("checksum missing for %s", candidate.AssetName)
+		}
+		if err := verifyFileSHA256(dest, expected); err != nil {
+			_ = os.Remove(dest)
+			return "", err
+		}
 	}
 	return dest, nil
 }
@@ -321,6 +338,81 @@ func downloadToFile(ctx context.Context, client *http.Client, rawURL, dest strin
 	return os.Rename(tmp, dest)
 }
 
+func downloadUpdateChecksums(ctx context.Context, client *http.Client, tag, proxy string) (string, error) {
+	rawURL, err := updateAssetDownloadURL(tag, updateChecksumsAssetName, proxy)
+	if err != nil {
+		return "", err
+	}
+	return downloadToString(ctx, client, rawURL, 1<<20)
+}
+
+func downloadToString(ctx context.Context, client *http.Client, rawURL string, maxBytes int64) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "cfsm-agent")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("download %s returned http %d", rawURL, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(body)) > maxBytes {
+		return "", fmt.Errorf("download %s exceeded %d bytes", rawURL, maxBytes)
+	}
+	return string(body), nil
+}
+
+func checksumForAsset(checksums, assetName string) (string, bool) {
+	for _, line := range strings.Split(checksums, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		sum := strings.ToLower(fields[0])
+		name := filepath.Base(fields[len(fields)-1])
+		if name == assetName && validSHA256Hex(sum) {
+			return sum, true
+		}
+	}
+	return "", false
+}
+
+func validSHA256Hex(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func verifyFileSHA256(path, expected string) error {
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	if !validSHA256Hex(expected) {
+		return fmt.Errorf("invalid sha256 checksum for %s", filepath.Base(path))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	actual := hex.EncodeToString(h.Sum(nil))
+	if actual != expected {
+		return fmt.Errorf("sha256 mismatch for %s", filepath.Base(path))
+	}
+	return nil
+}
 func scheduleUnixUpdateInstall(serviceName, logFile, binPath string, now int64) (string, error) {
 	cmdLine := fmt.Sprintf("sleep %d; %s install; rm -f %s",
 		int(autoUpdateDelay.Seconds()), quoteShell(binPath), quoteShell(binPath))
@@ -456,12 +548,12 @@ WantedBy=multi-user.target
 
 func quoteSystemdExecArg(s string) string {
 	replacer := strings.NewReplacer(
-		`\`, `\\`,
-		`"`, `\"`,
-		`%`, `%%`,
+		"\\", "\\\\",
+		"\"", "\\\"",
+		"%", "%%",
 		"\n", " ",
 	)
-	return `"` + replacer.Replace(s) + `"`
+	return "\"" + replacer.Replace(s) + "\""
 }
 
 func parseUpdateVersion(raw string) (updateVersion, error) {

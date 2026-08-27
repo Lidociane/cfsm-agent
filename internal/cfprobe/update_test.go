@@ -1,7 +1,12 @@
 package cfprobe
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -169,6 +174,40 @@ func TestRemoteConfigMD5UsesHeaderAndPreservesUpdateProxy(t *testing.T) {
 	}
 }
 
+func TestChecksumForAsset(t *testing.T) {
+	assetSum := strings.Repeat("a", sha256.Size*2)
+	otherSum := strings.Repeat("b", sha256.Size*2)
+	checksums := "not-a-checksum  cf-probe-linux-arm64\n" +
+		assetSum + "  dist/cf-probe-linux-amd64\n" +
+		otherSum + "  cf-probe-darwin-arm64\n"
+
+	got, ok := checksumForAsset(checksums, "cf-probe-linux-amd64")
+	if !ok {
+		t.Fatal("checksumForAsset() did not find asset")
+	}
+	if got != assetSum {
+		t.Fatalf("checksumForAsset() = %q, want %q", got, assetSum)
+	}
+	if _, ok := checksumForAsset(checksums, "missing"); ok {
+		t.Fatal("checksumForAsset() found unexpected asset")
+	}
+}
+
+func TestVerifyFileSHA256(t *testing.T) {
+	body := []byte("cfsm-agent-update")
+	path := filepath.Join(t.TempDir(), "asset")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	expected := hex.EncodeToString(sum[:])
+	if err := verifyFileSHA256(path, expected); err != nil {
+		t.Fatalf("verifyFileSHA256() error = %v", err)
+	}
+	if err := verifyFileSHA256(path, strings.Repeat("0", sha256.Size*2)); err == nil {
+		t.Fatal("verifyFileSHA256() succeeded with wrong checksum")
+	}
+}
 func testGitHubRelease(tag string, prerelease, draft bool, publishedAt time.Time, assetNames ...string) githubRelease {
 	assets := make([]githubReleaseAsset, 0, len(assetNames))
 	for _, name := range assetNames {
