@@ -92,6 +92,20 @@ func TestDiskIOStatsFromCountersRejectsChangedDeviceSet(t *testing.T) {
 	}
 }
 
+func TestShouldIncludeNetInterfaceExcludesTunnelInterfaces(t *testing.T) {
+	for _, name := range []string{"tailscale0", "tun0", "wg0", "wireguard0", "ipsec0", "gre0", "gretap0", "ipip0", "sit0", "ip6tnl0", "zerotier0"} {
+		if shouldIncludeNetInterface(name, nil) {
+			t.Fatalf("%s should be excluded", name)
+		}
+	}
+}
+
+func TestShouldIncludeNetInterfaceAllowsPhysicalInterface(t *testing.T) {
+	if !shouldIncludeNetInterface("eth0", nil) {
+		t.Fatal("eth0 should be included")
+	}
+}
+
 func TestMemoryUsedMBFromKBUsesMemAvailable(t *testing.T) {
 	if got := memoryUsedMBFromKB(8*1024, 3*1024, 0, 0, 0); got != 5 {
 		t.Fatalf("got %d, want 5", got)

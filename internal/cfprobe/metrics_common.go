@@ -106,7 +106,10 @@ func shouldIncludeNetInterface(name string, wanted map[string]bool) bool {
 }
 
 func isExcludedNetInterface(name string) bool {
-	for _, prefix := range []string{"br", "cni", "docker", "podman", "flannel", "lo", "veth", "virbr", "vmbr", "tap", "fwbr", "fwpr"} {
+	for _, prefix := range []string{
+		"br", "cni", "docker", "podman", "flannel", "lo", "veth", "virbr", "vmbr", "tap", "fwbr", "fwpr",
+		"tailscale", "tun", "wg", "wireguard", "ipsec", "gre", "gretap", "ipip", "sit", "ip6tnl", "zerotier",
+	} {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}
