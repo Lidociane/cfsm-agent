@@ -154,7 +154,7 @@ func TestRemoteConfigMD5UsesHeaderAndPreservesUpdateProxy(t *testing.T) {
 		log:   newLogger(false),
 	}
 	headers := http.Header{"X-Agent-Config-Md5": []string{newMD5}}
-	body := []byte("collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto")
+	body := []byte("collect_interval=0&report_interval=60&reset_day=1&schema_version=6&interface=&connection_mode=auto&ping_mode=icmp")
 
 	if err := a.applyRemoteConfig(body, headers); err != nil {
 		t.Fatalf("applyRemoteConfig() error = %v", err)
@@ -165,6 +165,9 @@ func TestRemoteConfigMD5UsesHeaderAndPreservesUpdateProxy(t *testing.T) {
 	}
 	if got.ConfigMD5 != newMD5 {
 		t.Fatalf("ConfigMD5 = %q, want %q", got.ConfigMD5, newMD5)
+	}
+	if got.PingMode != pingModeICMP {
+		t.Fatalf("PingMode = %q, want %q", got.PingMode, pingModeICMP)
 	}
 	if got.UpdateProxy != a.cfg.UpdateProxy {
 		t.Fatalf("UpdateProxy = %q, want %q", got.UpdateProxy, a.cfg.UpdateProxy)

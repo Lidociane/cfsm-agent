@@ -229,9 +229,12 @@ func icmpPing(target string, timeout time.Duration) (int, error) {
 	return ms, nil
 }
 
-func measureProbe(target string, count, defaultPort int, log logger) ProbeResult {
+func measureProbe(kind, target string, count, defaultPort int, log logger) ProbeResult {
 	if strings.TrimSpace(target) == "" {
 		return ProbeResult{RTTMs: -1, Loss: 100, OK: false}
+	}
+	if kind != pingModeICMP {
+		kind = pingModeTCP
 	}
 	if count < 1 {
 		count = 4
@@ -242,15 +245,32 @@ func measureProbe(target string, count, defaultPort int, log logger) ProbeResult
 	ok := 0
 	values := make([]int, 0, count)
 	for i := 0; i < count; i++ {
-		ms, err := tcpPing(target, defaultPort, defaultPingTimeout)
+		var ms int
+		var err error
+		if kind == pingModeICMP {
+			ms, err = icmpPing(target, defaultPingTimeout)
+		} else {
+			ms, err = tcpPing(target, defaultPort, defaultPingTimeout)
+		}
 		if err == nil {
 			ok++
 			values = append(values, ms)
 		} else {
-			log.debugf("probe tcp failed target=%s err=%v", target, err)
+			log.debugf("probe %s failed target=%s err=%v", kind, target, err)
 		}
 	}
 	return buildProbeResult(count, values[:ok])
+}
+
+func probeHistoryKey(kind, target string) string {
+	if kind != pingModeICMP {
+		kind = pingModeTCP
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
+	return kind + "\x00" + target
 }
 
 func buildProbeResult(count int, values []int) ProbeResult {

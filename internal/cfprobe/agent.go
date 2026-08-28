@@ -182,8 +182,8 @@ func Run(configFile string, debug bool, version string) error {
 	a.basicAt = time.Now()
 
 	a.log.info("CF-Server-Monitor Go Probe started version=%s platform=%s config=%s", version, platformName(), paths.ConfigFile)
-	a.log.debugf("config id=%s url=%s report_interval=%ds collect_interval=%ds reset_day=%d connection_mode=%s interface=%s auto_update=%v",
-		cfg.ServerID, cfg.WorkerURL, cfg.ReportInterval, cfg.CollectInterval, cfg.ResetDay, cfg.ConnectionMode, firstNonEmpty(cfg.Interface, "auto"), cfg.AutoUpdate)
+	a.log.debugf("config id=%s url=%s report_interval=%ds collect_interval=%ds reset_day=%d connection_mode=%s ping_mode=%s interface=%s auto_update=%v",
+		cfg.ServerID, cfg.WorkerURL, cfg.ReportInterval, cfg.CollectInterval, cfg.ResetDay, cfg.ConnectionMode, cfg.PingMode, firstNonEmpty(cfg.Interface, "auto"), cfg.AutoUpdate)
 
 	go a.networkWorker(ctx)
 	if a.usesWSS() {
@@ -758,10 +758,10 @@ func (a *Agent) networkWorker(ctx context.Context) {
 				needUpdate = true
 			}
 			if lastProbe.IsZero() || now.Sub(lastProbe) >= metricsProbeInterval {
-				ctHistory.add(now, cfg.CTNode, measureProbe(cfg.CTNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
-				cuHistory.add(now, cfg.CUNode, measureProbe(cfg.CUNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
-				cmHistory.add(now, cfg.CMNode, measureProbe(cfg.CMNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
-				bdHistory.add(now, cfg.BDNode, measureProbe(cfg.BDNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				ctHistory.add(now, probeHistoryKey(cfg.PingMode, cfg.CTNode), measureProbe(cfg.PingMode, cfg.CTNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				cuHistory.add(now, probeHistoryKey(cfg.PingMode, cfg.CUNode), measureProbe(cfg.PingMode, cfg.CUNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				cmHistory.add(now, probeHistoryKey(cfg.PingMode, cfg.CMNode), measureProbe(cfg.PingMode, cfg.CMNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
+				bdHistory.add(now, probeHistoryKey(cfg.PingMode, cfg.BDNode), measureProbe(cfg.PingMode, cfg.BDNode, metricsProbeSampleCount, defaultMetricsTCPPort, a.log))
 				snap.CT = ctHistory.snapshot(now)
 				snap.CU = cuHistory.snapshot(now)
 				snap.CM = cmHistory.snapshot(now)
@@ -855,6 +855,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		"custom_bd":           true,
 		"interface":           true,
 		"connection_mode":     true,
+		"ping_mode":           true,
 		"rx_correction":       true,
 		"tx_correction":       true,
 		"update":              true,
@@ -868,7 +869,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if update != "" && update != "0" && update != "1" {
 		return fmt.Errorf("invalid update %s", update)
 	}
-	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("wss_report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface") || values.Has("connection_mode")
+	hasConfig := values.Has("collect_interval") || values.Has("report_interval") || values.Has("wss_report_interval") || values.Has("reset_day") || values.Has("schema_version") || values.Has("interface") || values.Has("connection_mode") || values.Has("ping_mode")
 	hasCorrection := values.Has("rx_correction") || values.Has("tx_correction")
 	cfg := a.configSnapshot()
 	if !hasConfig {
@@ -924,6 +925,10 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if err != nil {
 		return err
 	}
+	pingMode, err := normalizePingMode(values.Get("ping_mode"))
+	if err != nil {
+		return err
+	}
 	effectiveCollect := collect
 	if connectionMode == connectionModeAuto && (collect == 0 || collect > wssReport) {
 		effectiveCollect = wssReport
@@ -932,7 +937,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 	if hasRemoteMD5 {
 		shouldApply = newMD5 != cfg.ConfigMD5
 	} else {
-		shouldApply = remoteConfigDiffers(cfg, values, effectiveCollect, report, reset, iface, connectionMode)
+		shouldApply = remoteConfigDiffers(cfg, values, effectiveCollect, report, reset, iface, connectionMode, pingMode)
 	}
 	if shouldApply {
 		nextCfg := cfg
@@ -945,6 +950,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		nextCfg.BDNode = values.Get("custom_bd")
 		nextCfg.Interface = iface
 		nextCfg.ConnectionMode = connectionMode
+		nextCfg.PingMode = pingMode
 		if hasRemoteMD5 {
 			nextCfg.ConfigMD5 = newMD5
 		}
@@ -972,7 +978,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		}
 		a.syncReportTransport()
 		a.wakeTick()
-		a.log.info("dynamic configuration applied md5=%s connection_mode=%s interface=%s", firstNonEmpty(nextCfg.ConfigMD5, "none"), nextCfg.ConnectionMode, firstNonEmpty(iface, "auto"))
+		a.log.info("dynamic configuration applied md5=%s connection_mode=%s ping_mode=%s interface=%s", firstNonEmpty(nextCfg.ConfigMD5, "none"), nextCfg.ConnectionMode, nextCfg.PingMode, firstNonEmpty(iface, "auto"))
 		cfg = nextCfg
 	}
 	if hasCorrection {
@@ -1007,7 +1013,7 @@ func (a *Agent) syncReportTransport() {
 	}
 }
 
-func remoteConfigDiffers(cfg Config, values url.Values, collect, report, reset int, iface, connectionMode string) bool {
+func remoteConfigDiffers(cfg Config, values url.Values, collect, report, reset int, iface, connectionMode, pingMode string) bool {
 	return cfg.CollectInterval != collect ||
 		cfg.ReportInterval != report ||
 		cfg.ResetDay != reset ||
@@ -1016,7 +1022,8 @@ func remoteConfigDiffers(cfg Config, values url.Values, collect, report, reset i
 		cfg.CMNode != values.Get("custom_cm") ||
 		cfg.BDNode != values.Get("custom_bd") ||
 		cfg.Interface != iface ||
-		cfg.ConnectionMode != connectionMode
+		cfg.ConnectionMode != connectionMode ||
+		cfg.PingMode != pingMode
 }
 func inIntSet(v int, allowed ...int) bool {
 	for _, item := range allowed {

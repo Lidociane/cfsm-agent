@@ -21,6 +21,7 @@ func defaultConfig() Config {
 		ReportInterval:  defaultReportIntervalSec,
 		ResetDay:        1,
 		ConnectionMode:  connectionModeAuto,
+		PingMode:        pingModeTCP,
 		ConfigMD5:       "none",
 	}
 }
@@ -49,6 +50,18 @@ func normalizeConnectionMode(raw string) (string, error) {
 		return connectionModeHTTP, nil
 	default:
 		return "", fmt.Errorf("connection_mode 仅支持 auto 或 http")
+	}
+}
+
+func normalizePingMode(raw string) (string, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	switch raw {
+	case "", pingModeTCP:
+		return pingModeTCP, nil
+	case pingModeICMP:
+		return pingModeICMP, nil
+	default:
+		return "", fmt.Errorf("ping_mode 仅支持 tcp 或 icmp")
 	}
 }
 
@@ -121,6 +134,7 @@ func readConfig(path string) (Config, error) {
 	cfg.Interface, _ = normalizeInterfaceList(values["INTERFACE"])
 	cfg.ResetDay = parseIntDefault(values["RESET_DAY"], cfg.ResetDay)
 	cfg.ConnectionMode, _ = normalizeConnectionMode(values["CONNECTION_MODE"])
+	cfg.PingMode, _ = normalizePingMode(values["PING_MODE"])
 	cfg.AutoUpdate = values["AUTO_UPDATE"] == "1"
 	cfg.UpdateProxy = strings.TrimSpace(values["UPDATE_PROXY"])
 	cfg.ConfigMD5 = values["CONFIG_MD5"]
@@ -152,6 +166,7 @@ func writeConfig(path string, cfg Config) error {
 	writeKV("INTERFACE", cfg.Interface)
 	writeKV("RESET_DAY", strconv.Itoa(cfg.ResetDay))
 	writeKV("CONNECTION_MODE", cfg.ConnectionMode)
+	writeKV("PING_MODE", cfg.PingMode)
 	if cfg.AutoUpdate {
 		writeKV("AUTO_UPDATE", "1")
 	} else {
@@ -190,6 +205,11 @@ func normalizeConfigIntervals(cfg *Config) {
 		cfg.ConnectionMode = mode
 	} else {
 		cfg.ConnectionMode = connectionModeAuto
+	}
+	if mode, err := normalizePingMode(cfg.PingMode); err == nil {
+		cfg.PingMode = mode
+	} else {
+		cfg.PingMode = pingModeTCP
 	}
 	cfg.UpdateProxy = strings.TrimSpace(cfg.UpdateProxy)
 }

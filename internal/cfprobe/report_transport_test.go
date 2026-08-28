@@ -596,6 +596,7 @@ func TestWSSConfigBodySupportsPayloadObject(t *testing.T) {
 			"schema_version":      configSchemaVersion,
 			"interface":           "",
 			"connection_mode":     "auto",
+			"ping_mode":           "tcp",
 			"configMd5":           "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		},
 	})
@@ -612,6 +613,9 @@ func TestWSSConfigBodySupportsPayloadObject(t *testing.T) {
 	if values.Get("wss_report_interval") != "2" {
 		t.Fatalf("wss_report_interval = %q, want 2", values.Get("wss_report_interval"))
 	}
+	if values.Get("ping_mode") != "tcp" {
+		t.Fatalf("ping_mode = %q, want tcp", values.Get("ping_mode"))
+	}
 	if headers.Get("X-Agent-Config-Md5") != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		t.Fatalf("X-Agent-Config-Md5 = %q", headers.Get("X-Agent-Config-Md5"))
 	}
@@ -620,13 +624,13 @@ func TestWSSConfigBodySupportsPayloadObject(t *testing.T) {
 func TestWSSConfigBodySupportsConfigBodyAndConfigObject(t *testing.T) {
 	body, headers, ok := wssConfigBodyAndHeaders(wsServerFrame{
 		Type:       "ack",
-		ConfigBody: "collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto",
+		ConfigBody: "collect_interval=0&report_interval=60&reset_day=1&schema_version=6&interface=&connection_mode=auto&ping_mode=tcp",
 		ConfigMD5:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	})
 	if !ok {
 		t.Fatal("config_body frame returned ok=false")
 	}
-	if string(body) != "collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto" {
+	if string(body) != "collect_interval=0&report_interval=60&reset_day=1&schema_version=6&interface=&connection_mode=auto&ping_mode=tcp" {
 		t.Fatalf("body = %q", string(body))
 	}
 	if headers.Get("X-Agent-Config-Md5") != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
@@ -642,6 +646,7 @@ func TestWSSConfigBodySupportsConfigBodyAndConfigObject(t *testing.T) {
 			"schema_version":   configSchemaVersion,
 			"interface":        "",
 			"connection_mode":  "auto",
+			"ping_mode":        "icmp",
 			"config_md5":       "cccccccccccccccccccccccccccccccc",
 		},
 	})
@@ -654,6 +659,9 @@ func TestWSSConfigBodySupportsConfigBodyAndConfigObject(t *testing.T) {
 	}
 	if values.Get("report_interval") != "120" {
 		t.Fatalf("report_interval = %q, want 120", values.Get("report_interval"))
+	}
+	if values.Get("ping_mode") != "icmp" {
+		t.Fatalf("ping_mode = %q, want icmp", values.Get("ping_mode"))
 	}
 	if headers.Get("X-Agent-Config-Md5") != "cccccccccccccccccccccccccccccccc" {
 		t.Fatalf("X-Agent-Config-Md5 = %q", headers.Get("X-Agent-Config-Md5"))
@@ -679,7 +687,7 @@ func TestReportTransportWSSConfigAppliesRemoteConfig(t *testing.T) {
 	transport := reportTransport{agent: &agent}
 	transport.handleConfigFrame(wsServerFrame{
 		Type:      "config",
-		Config:    "collect_interval=10&report_interval=120&wss_report_interval=4&reset_day=1&schema_version=5&interface=&connection_mode=auto",
+		Config:    "collect_interval=10&report_interval=120&wss_report_interval=4&reset_day=1&schema_version=6&interface=&connection_mode=auto&ping_mode=icmp",
 		ConfigMD5: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	})
 
@@ -694,6 +702,9 @@ func TestReportTransportWSSConfigAppliesRemoteConfig(t *testing.T) {
 	}
 	if agent.cfg.ConfigMD5 != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		t.Fatalf("ConfigMD5 = %q", agent.cfg.ConfigMD5)
+	}
+	if agent.cfg.PingMode != pingModeICMP {
+		t.Fatalf("PingMode = %q, want %q", agent.cfg.PingMode, pingModeICMP)
 	}
 	persisted, err := os.ReadFile(configFile)
 	if err != nil {
@@ -729,7 +740,7 @@ func TestReportTransportWSSConfigCanSwitchToHTTP(t *testing.T) {
 	agent.reporter = &transport
 	transport.handleConfigFrame(wsServerFrame{
 		Type:      "config",
-		Config:    "collect_interval=0&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=http",
+		Config:    "collect_interval=0&report_interval=60&reset_day=1&schema_version=6&interface=&connection_mode=http&ping_mode=tcp",
 		ConfigMD5: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	})
 
@@ -765,7 +776,7 @@ func TestReportTransportWSSConfigAllowsMissingMD5(t *testing.T) {
 	transport := reportTransport{agent: &agent}
 	transport.handleConfigFrame(wsServerFrame{
 		Type:   "config",
-		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=5&interface=&connection_mode=auto",
+		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=6&interface=&connection_mode=auto&ping_mode=tcp",
 	})
 
 	if agent.cfg.ReportInterval != 120 {
@@ -793,11 +804,11 @@ func TestReportTransportWSSConfigThrottlesToOneMinute(t *testing.T) {
 	transport := reportTransport{agent: &agent}
 	transport.handleConfigFrame(wsServerFrame{
 		Type:   "config",
-		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=5&interface=&connection_mode=auto",
+		Config: "collect_interval=0&report_interval=120&reset_day=1&schema_version=6&interface=&connection_mode=auto&ping_mode=tcp",
 	})
 	transport.handleConfigFrame(wsServerFrame{
 		Type:   "config",
-		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=5&interface=&connection_mode=auto",
+		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=6&interface=&connection_mode=auto&ping_mode=tcp",
 	})
 	if agent.cfg.ReportInterval != 120 {
 		t.Fatalf("ReportInterval after throttled config = %d, want 120", agent.cfg.ReportInterval)
@@ -808,7 +819,7 @@ func TestReportTransportWSSConfigThrottlesToOneMinute(t *testing.T) {
 	transport.mu.Unlock()
 	transport.handleConfigFrame(wsServerFrame{
 		Type:   "config",
-		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=5&interface=&connection_mode=auto",
+		Config: "collect_interval=0&report_interval=180&reset_day=1&schema_version=6&interface=&connection_mode=auto&ping_mode=tcp",
 	})
 	if agent.cfg.ReportInterval != 180 {
 		t.Fatalf("ReportInterval after throttle window = %d, want 180", agent.cfg.ReportInterval)

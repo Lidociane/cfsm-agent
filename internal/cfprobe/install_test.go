@@ -15,12 +15,14 @@ func TestMergeExplicitInstallConfig(t *testing.T) {
 		ReportInterval: 120,
 		ResetDay:       5,
 		ConnectionMode: connectionModeAuto,
+		PingMode:       pingModeTCP,
 		AutoUpdate:     false,
 	}
 	flagConfig := Config{
 		ReportInterval: defaultReportIntervalSec,
 		ResetDay:       1,
 		ConnectionMode: connectionModeHTTP,
+		PingMode:       pingModeICMP,
 		AutoUpdate:     true,
 		UpdateProxy:    "https://gh-proxy.example.com",
 	}
@@ -39,11 +41,20 @@ func TestMergeExplicitInstallConfig(t *testing.T) {
 	if merged.ConnectionMode != connectionModeAuto {
 		t.Fatalf("ConnectionMode = %q, want preserved %q", merged.ConnectionMode, connectionModeAuto)
 	}
+	if merged.PingMode != pingModeTCP {
+		t.Fatalf("PingMode = %q, want preserved %q", merged.PingMode, pingModeTCP)
+	}
 
 	merged = existing
 	mergeExplicitInstallConfig(&merged, flagConfig, map[string]bool{"connection_mode": true})
 	if merged.ConnectionMode != connectionModeHTTP {
 		t.Fatalf("ConnectionMode = %q, want %q", merged.ConnectionMode, connectionModeHTTP)
+	}
+
+	merged = existing
+	mergeExplicitInstallConfig(&merged, flagConfig, map[string]bool{"ping_mode": true})
+	if merged.PingMode != pingModeICMP {
+		t.Fatalf("PingMode = %q, want %q", merged.PingMode, pingModeICMP)
 	}
 
 	merged = existing

@@ -7,13 +7,15 @@ const (
 	legacyAgentVersion          = "1.0.0"
 	maxTrafficCorrectionGB      = 1000000
 	autoUpdateDelay             = 60 * time.Second
-	configSchemaVersion         = "5"
+	configSchemaVersion         = "6"
 	defaultReportIntervalSec    = 60
 	defaultWSSReportIntervalSec = 2
 	minWSSReportIntervalSec     = 1
 	maxWSSReportIntervalSec     = 5
 	connectionModeAuto          = "auto"
 	connectionModeHTTP          = "http"
+	pingModeTCP                 = "tcp"
+	pingModeICMP                = "icmp"
 )
 
 type Config struct {
@@ -29,6 +31,7 @@ type Config struct {
 	Interface       string
 	ResetDay        int
 	ConnectionMode  string
+	PingMode        string
 	AutoUpdate      bool
 	UpdateProxy     string
 	// ConfigMD5 mirrors the worker dynamic config version; local fields like

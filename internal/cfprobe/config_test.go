@@ -40,6 +40,7 @@ func TestConfigPersistsUpdateProxy(t *testing.T) {
 	cfg.AutoUpdate = true
 	cfg.UpdateProxy = "https://gh-proxy.example.com"
 	cfg.ConnectionMode = connectionModeHTTP
+	cfg.PingMode = pingModeICMP
 
 	if err := writeConfig(path, cfg); err != nil {
 		t.Fatalf("writeConfig returned error: %v", err)
@@ -57,6 +58,9 @@ func TestConfigPersistsUpdateProxy(t *testing.T) {
 	if got.ConnectionMode != connectionModeHTTP {
 		t.Fatalf("ConnectionMode = %q, want %q", got.ConnectionMode, connectionModeHTTP)
 	}
+	if got.PingMode != pingModeICMP {
+		t.Fatalf("PingMode = %q, want %q", got.PingMode, pingModeICMP)
+	}
 }
 
 func TestReadConfigDefaultsConnectionModeAuto(t *testing.T) {
@@ -71,5 +75,8 @@ func TestReadConfigDefaultsConnectionModeAuto(t *testing.T) {
 	}
 	if got.ConnectionMode != connectionModeAuto {
 		t.Fatalf("ConnectionMode = %q, want %q", got.ConnectionMode, connectionModeAuto)
+	}
+	if got.PingMode != pingModeTCP {
+		t.Fatalf("PingMode = %q, want %q", got.PingMode, pingModeTCP)
 	}
 }

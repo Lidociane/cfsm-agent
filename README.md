@@ -95,6 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.
 | `-interface=IFACES` | 指定统计网卡，多个用英文逗号分隔 | 自动汇总 |
 | `-reset_day=N` | 每月流量重置日，`1-31`；`0` 表示不重置 | `1` |
 | `-connection_mode=auto\|http` | 连接模式；`auto` 优先 WSS 实时上报并在不可用时 POST 兜底，`http` 仅按上报间隔 POST | `auto` |
+| `-ping_mode=tcp\|icmp` | Ping 探测模式；`tcp` 使用 TCP 连接探测，`icmp` 使用 ICMP 探测；两者均每 10 秒采样一次并按 1 分钟窗口聚合 | `tcp` |
 | `-auto_update=0\|1` | 是否开启自动检查更新 | `0` |
 | `-rx_correction=N` | 下行流量校正，单位 GB | 空 |
 | `-tx_correction=N` | 上行流量校正，单位 GB | 空 |
@@ -230,7 +231,7 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 ```json
 {
   "type": "config",
-  "body": "collect_interval=2&report_interval=60&reset_day=1&schema_version=5&interface=&connection_mode=auto&wss_report_interval=2"
+  "body": "collect_interval=2&report_interval=60&reset_day=1&schema_version=6&interface=&connection_mode=auto&wss_report_interval=2&ping_mode=tcp"
 }
 ```
 
@@ -243,10 +244,11 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
     "collect_interval": 2,
     "report_interval": 60,
     "reset_day": 1,
-    "schema_version": 5,
+    "schema_version": 6,
     "interface": "",
     "connection_mode": "auto",
-    "wss_report_interval": 2
+    "wss_report_interval": 2,
+    "ping_mode": "tcp"
   }
 }
 ```
@@ -346,7 +348,7 @@ WSS 也支持服务端下发动态配置，配置内容复用旧 POST 响应里�
 | `samples` | array | 可选，仅 `COLLECT_INTERVAL > 0` 时存在 |
 | `collect_interval` | number | 高频采样间隔，单位秒；`0` 表示不启用高频采样 |
 | `report_interval` | number | 上报间隔，单位秒 |
-| `config_schema` | string | 动态配置协议版本，当前为 `5`；WSS 建连 query、首次上报、约每 60 秒或 MD5 变化时携带 |
+| `config_schema` | string | 动态配置协议版本，当前为 `6`；WSS 建连 query、首次上报、约每 60 秒或 MD5 变化时携带 |
 | `config_md5` | string | 本地保存的远端配置 MD5；首次或为空时为 `none`，WSS 建连 query 与消息字段携带，POST 保留 `X-Agent-Config-Md5` Header |
 
 `time` 字段：

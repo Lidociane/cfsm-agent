@@ -99,12 +99,34 @@ func TestParseInstallOptionsConnectionMode(t *testing.T) {
 	}
 }
 
+func TestParseInstallOptionsPingMode(t *testing.T) {
+	got, err := parseInstallOptions([]string{"-ping_mode=icmp"})
+	if err != nil {
+		t.Fatalf("parseInstallOptions(-ping_mode=icmp) error = %v", err)
+	}
+	if got.PingMode != pingModeICMP {
+		t.Fatalf("PingMode = %q, want %q", got.PingMode, pingModeICMP)
+	}
+
+	got, err = parseInstallOptions([]string{"--ping-mode=tcp"})
+	if err != nil {
+		t.Fatalf("parseInstallOptions(--ping-mode=tcp) error = %v", err)
+	}
+	if got.PingMode != pingModeTCP {
+		t.Fatalf("PingMode = %q, want %q", got.PingMode, pingModeTCP)
+	}
+
+	if _, err := parseInstallOptions([]string{"-ping_mode=bad"}); err == nil {
+		t.Fatal("parseInstallOptions(-ping_mode=bad) expected error")
+	}
+}
+
 func TestParseInstallOptionsTracksExplicitFlags(t *testing.T) {
-	got, err := parseInstallOptions([]string{"-auto_update=1", "--auto-update=1", "-collect=5", "-connection_mode=http", "--install-ghproxy=https://gh-proxy.example.com"})
+	got, err := parseInstallOptions([]string{"-auto_update=1", "--auto-update=1", "-collect=5", "-connection_mode=http", "-ping_mode=icmp", "--install-ghproxy=https://gh-proxy.example.com"})
 	if err != nil {
 		t.Fatalf("parseInstallOptions() error = %v", err)
 	}
-	for _, name := range []string{"auto_update", "collect_interval", "connection_mode", "install_ghproxy"} {
+	for _, name := range []string{"auto_update", "collect_interval", "connection_mode", "ping_mode", "install_ghproxy"} {
 		if !got.Explicit[name] {
 			t.Fatalf("Explicit[%q] = false, want true (all: %v)", name, got.Explicit)
 		}

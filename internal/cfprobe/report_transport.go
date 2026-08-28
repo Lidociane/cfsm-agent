@@ -531,7 +531,7 @@ func wssConfigPayload(payload any) (string, string, map[string]string) {
 		}
 		values := url.Values{}
 		for _, key := range []string{
-			"collect_interval", "report_interval", "wss_report_interval", "reset_day", "schema_version", "interface", "connection_mode",
+			"collect_interval", "report_interval", "wss_report_interval", "reset_day", "schema_version", "interface", "connection_mode", "ping_mode",
 			"custom_ct", "custom_cu", "custom_cm", "custom_bd",
 			"rx_correction", "tx_correction", "update",
 		} {
