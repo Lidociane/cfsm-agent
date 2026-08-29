@@ -301,6 +301,9 @@ func initSystem() string {
 	if isOpenWrt() {
 		return "procd"
 	}
+	if isSynology() {
+		return "synology-rc"
+	}
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
 		if commandExists("rc-service") || fileExists("/sbin/openrc-run") {
 			return "openrc"
@@ -311,9 +314,6 @@ func initSystem() string {
 	}
 	if commandExists("rc-service") && fileExists("/etc/init.d") {
 		return "openrc"
-	}
-	if isSynology() {
-		return "synology-rc"
 	}
 	if commandExists("initctl") && fileExists("/etc/init") {
 		return "upstart"
@@ -387,6 +387,10 @@ func startService(paths Paths, debug bool) error {
 		_ = runCommand("initctl", "stop", paths.ServiceName)
 		return runCommand("initctl", "start", paths.ServiceName)
 	case "synology-rc":
+		if commandExists("systemctl") && fileExists(paths.ServiceFile) {
+			_ = runCommandQuiet("systemctl", "stop", paths.ServiceName+".service")
+			_ = runCommandQuiet("systemctl", "disable", paths.ServiceName+".service")
+		}
 		return runCommand(synologyServiceFile(paths), "restart")
 	case "windows":
 		return runCommand("schtasks", "/Run", "/TN", paths.ServiceName)
@@ -419,6 +423,10 @@ func stopService(paths Paths) {
 		_ = runCommand("initctl", "stop", paths.ServiceName)
 	case "synology-rc":
 		_ = runCommand(synologyServiceFile(paths), "stop")
+		if commandExists("systemctl") && fileExists(paths.ServiceFile) {
+			_ = runCommandQuiet("systemctl", "stop", paths.ServiceName+".service")
+			_ = runCommandQuiet("systemctl", "disable", paths.ServiceName+".service")
+		}
 	case "windows":
 		stopWindowsScheduledTask(paths)
 	default:
@@ -444,6 +452,12 @@ func removeService(paths Paths) {
 		_ = os.Remove("/etc/init/" + paths.ServiceName + ".conf")
 	case "synology-rc":
 		_ = os.Remove(synologyServiceFile(paths))
+		_ = os.Remove(paths.ServiceFile)
+		if commandExists("systemctl") {
+			_ = runCommandQuiet("systemctl", "daemon-reload")
+			_ = runCommandQuiet("systemctl", "reset-failed", paths.ServiceName)
+			_ = runCommandQuiet("systemctl", "reset-failed", paths.ServiceName+".service")
+		}
 	case "windows":
 		_ = runCommand("schtasks", "/Delete", "/TN", paths.ServiceName, "/F")
 	}

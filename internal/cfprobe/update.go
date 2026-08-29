@@ -416,7 +416,7 @@ func verifyFileSHA256(path, expected string) error {
 func scheduleUnixUpdateInstall(serviceName, logFile, binPath string, now int64) (string, error) {
 	cmdLine := fmt.Sprintf("sleep %d; %s install; rm -f %s",
 		int(autoUpdateDelay.Seconds()), quoteShell(binPath), quoteShell(binPath))
-	if runtime.GOOS == "linux" && fileExists("/run/systemd/system") {
+	if runtime.GOOS == "linux" && !isSynology() && fileExists("/run/systemd/system") {
 		unit := fmt.Sprintf("%s-auto-update-%d", serviceName, now)
 		if commandExists("systemd-run") {
 			out, err := exec.Command("systemd-run", "--unit="+unit, "/bin/sh", "-c", cmdLine).CombinedOutput()
