@@ -1,0 +1,193 @@
+name: Fork Sync
+
+# 在 GitHub 上点击 "Sync fork" 后自动:
+# 1. 把客户端安装/自升级脚本里的下载地址从上游仓库改写为本 fork 仓库
+# 2. 若上游发布了新的正式版本(tag),则以同步后的代码自动创建同号正式版 Release
+#
+# 说明: GITHUB_TOKEN 的推送和 gh release create 不会触发其他 workflow,
+# 因此改写、构建、发 Release 必须在本 workflow 内一次性完成。
+# 定时任务仅作为 "Sync fork 未触发 push 事件" 时的兜底。
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: huilang-me/cfsm-agent
+  FORK_REPO: Lidociane/cfsm-agent
+
+jobs:
+  rewrite-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Permanently disable upstream snapshot workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 不删除 snapshot.yml(避免上游再次修改该文件时 Sync fork 产生 delete/modify 冲突),
+          # 改为通过 API 永久禁用, 并取消 Sync 时已被触发的运行。
+          # 本步骤每次运行都会执行(含每小时 cron 兜底), 即使被自动重新启用也会在 1 小时内再次禁用。
+          wf_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows" \
+            --jq '.workflows[] | select(.path == ".github/workflows/snapshot.yml" or .name == "Publish Snapshot") | .id' \
+            | head -n 1 || true)"
+          if [ -z "$wf_id" ]; then
+            echo "snapshot workflow not found, nothing to disable."
+            exit 0
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/actions/workflows/$wf_id/disable" >/dev/null || true
+          echo "Disabled snapshot workflow (id=$wf_id)."
+          for status in queued in_progress; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf_id/runs?status=$status" \
+              --jq ".workflow_runs[].id" 2>/dev/null || true
+          done | sort -u | while IFS= read -r run_id; do
+            [ -n "$run_id" ] || continue
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/cancel" >/dev/null 2>&1 || true
+            echo "Cancelled snapshot run $run_id."
+          done
+
+      - name: Rewrite client download addresses to fork
+        run: |
+          set -euo pipefail
+          # 安装脚本与文档: 全量替换仓库地址
+          for f in install.sh install.ps1 README.md; do
+            [ -f "$f" ] || continue
+            if grep -q "$UPSTREAM_REPO" "$f"; then
+              sed -i "s|$UPSTREAM_REPO|$FORK_REPO|g" "$f"
+            fi
+          done
+          # Go 源码: 只替换仓库地址字面量与 release 下载 URL,
+          # 不动 go.mod / import 的模块路径(github.com/huilang-me/cfsm-agent/...)
+          go_files="$(grep -rl -e "\"$UPSTREAM_REPO\"" -e "github.com/$UPSTREAM_REPO/releases" --include='*.go' . || true)"
+          for f in $go_files; do
+            sed -i "s|\"$UPSTREAM_REPO\"|\"$FORK_REPO\"|g; s|github.com/$UPSTREAM_REPO/releases|github.com/$FORK_REPO/releases|g" "$f"
+          done
+
+      - name: Push rewrite commit
+        id: push
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="${GITHUB_REF_NAME}"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git add -A
+            git commit -m "ci(fork): rewrite client download URLs to ${FORK_REPO} [skip ci]"
+            # main 可能在任务执行期间被更新, rebase 后重试
+            git pull --rebase origin "$branch"
+            git push origin "HEAD:refs/heads/${branch}"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve upstream version to publish
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # "Sync fork" 不会带上游 tags, 只能从上游仓库远端读取
+          tags="$(git ls-remote --tags "https://github.com/${UPSTREAM_REPO}.git" \
+            | awk '{print $2}' \
+            | sed 's|refs/tags/||; s|\^{}$||' \
+            | grep -E '^v[0-9]' \
+            | sort -uV | tac)"
+          for t in $tags; do
+            # 本 fork 已有该正式版则跳过, 继续找下一个缺失的版本
+            if gh release view "$t" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              continue
+            fi
+            # 该 tag 的 commit 必须已包含在当前 main 中, 保证版本号真实跟随上游代码
+            git fetch -f "https://github.com/${UPSTREAM_REPO}.git" "refs/tags/${t}:refs/upstream-tags/${t}" >/dev/null 2>&1 || continue
+            commit="$(git rev-parse "refs/upstream-tags/${t}^{commit}")"
+            if git merge-base --is-ancestor "$commit" HEAD; then
+              echo "version=$t" >> "$GITHUB_OUTPUT"
+              echo "Publishing fork release ${t}"
+              exit 0
+            fi
+          done
+          echo "No new upstream release to publish."
+          echo "version=" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        if: steps.version.outputs.version != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release binaries
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+
+          build_one() {
+            goos="$1"
+            goarch="$2"
+            suffix="$3"
+            goarm="${4:-}"
+            output="dist/cf-probe-${goos}-${suffix}"
+            if [ "$goos" = "windows" ]; then
+              output="${output}.exe"
+            fi
+            echo "Building ${goos}/${goarch} -> ${output}"
+            GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" CGO_ENABLED=0 \
+              go build -trimpath -ldflags="$LDFLAGS" -o "$output" ./cmd/cf-probe
+          }
+
+          build_one linux amd64 amd64
+          build_one linux arm64 arm64
+          build_one linux 386 386
+          build_one linux arm armv5 5
+          build_one linux arm armv6 6
+          build_one linux arm armv7 7
+          build_one linux loong64 loong64
+          build_one freebsd amd64 amd64
+          build_one freebsd arm64 arm64
+          build_one freebsd 386 386
+          build_one freebsd arm arm
+          build_one darwin amd64 amd64
+          build_one darwin arm64 arm64
+          build_one windows amd64 amd64
+          build_one windows arm64 arm64
+          build_one windows 386 386
+
+          sha256sum dist/* > dist/checksums.txt
+
+      - name: Publish fork release
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # 复用上游 release 说明, 取不到则用默认说明
+          notes="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${VERSION}" --jq '.body // ""' 2>/dev/null || true)"
+          if [ -z "$notes" ]; then
+            notes="Fork release ${VERSION}, synced from ${UPSTREAM_REPO}."
+          fi
+          gh release create "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "${{ steps.push.outputs.sha }}" \
+            --title "$VERSION" \
+            --notes "$notes" \
+            dist/*
