@@ -45,6 +45,7 @@ type Agent struct {
 	lastSample               time.Time
 	lastReport               time.Time
 	lastPost                 time.Time
+	lastPostAttempt          time.Time
 	lastConfigStateReportAt  time.Time
 	lastConfigStateReportMD5 string
 	updateMu                 sync.Mutex
@@ -83,6 +84,12 @@ type rollingProbeHistory struct {
 type metricSample struct {
 	at      time.Time
 	metrics map[string]any
+}
+
+type reportSendResult struct {
+	ok      bool
+	viaWSS  bool
+	viaPOST bool
 }
 
 type remoteConfigRequest struct {
@@ -402,7 +409,7 @@ func (a *Agent) tick() {
 	if postDue && !postAllowed && wssEnabled && a.reporter != nil {
 		a.reporter.logPostFallbackDelayed()
 	}
-	shouldPostReport := postDue && postAllowed
+	shouldPostReport := postDue && postAllowed && a.postAttemptAllowed(now, reportInterval)
 	shouldSample := false
 	if collectInterval := effectiveCollectInterval(cfg); collectInterval > 0 {
 		shouldSample = a.lastSample.IsZero() || now.Sub(a.lastSample) >= collectInterval
@@ -455,11 +462,11 @@ func (a *Agent) tick() {
 		a.lastSample = now
 	}
 	if shouldWSSReport || shouldPostReport {
-		if a.sendReport(cfg, m, shouldWSSReport, shouldPostReport) {
-			if shouldWSSReport {
+		if result := a.sendReport(cfg, m, shouldWSSReport, shouldPostReport, reportInterval); result.ok {
+			if result.viaWSS {
 				a.lastReport = now
 				a.lastPost = now
-			} else {
+			} else if result.viaPOST {
 				a.lastPost = now
 			}
 			a.samples = nil
@@ -568,32 +575,51 @@ func (a *Agent) report(m Metrics) {
 	_, _ = a.postReportBody(cfg, body, sampleCount, false)
 }
 
-func (a *Agent) sendReport(cfg Config, m Metrics, preferWSS, allowPOST bool) bool {
+func (a *Agent) sendReport(cfg Config, m Metrics, preferWSS, allowPOST bool, reportInterval time.Duration) reportSendResult {
 	reportAt := time.Now()
 	body, sampleCount, err := a.buildReportBodyForConfig(cfg, m, reportAt)
 	if err != nil {
 		a.log.warnf("marshal payload failed: %v", err)
-		return false
+		return reportSendResult{}
 	}
 	a.logMetricsSummary(m)
+	wssFailed := false
 	if preferWSS && a.reporter != nil {
 		a.log.debugf("WSS report attempt url=%s payload_bytes=%d samples=%d", a.reporter.url(), len(body), sampleCount)
 		if a.reporter.send(body) {
-			return true
+			return reportSendResult{ok: true, viaWSS: true}
 		}
+		wssFailed = true
 	}
-	if !allowPOST {
-		return false
+	if !allowPOST && !wssFailed {
+		return reportSendResult{}
 	}
 	if preferWSS && a.reporter != nil && !a.reporter.postFallbackAllowed() {
 		a.reporter.logPostFallbackDelayed()
-		return false
+		return reportSendResult{}
 	}
-	statusCode, _ := a.postReportBody(cfg, body, sampleCount, preferWSS)
+	if !a.postAttemptAllowed(reportAt, reportInterval) {
+		return reportSendResult{}
+	}
+	a.lastPostAttempt = reportAt
+	statusCode, err := a.postReportBody(cfg, body, sampleCount, preferWSS)
 	if isAuthConfigHTTPStatus(statusCode) && a.reporter != nil {
 		a.reporter.delayProtocol(fmt.Sprintf("POST fallback http=%d", statusCode))
 	}
-	return true
+	if err != nil || statusCode < 200 || statusCode >= 300 {
+		return reportSendResult{}
+	}
+	return reportSendResult{ok: true, viaPOST: true}
+}
+
+func (a *Agent) postAttemptAllowed(now time.Time, reportInterval time.Duration) bool {
+	if a == nil || a.lastPostAttempt.IsZero() {
+		return true
+	}
+	if reportInterval < time.Second {
+		reportInterval = time.Duration(defaultReportIntervalSec) * time.Second
+	}
+	return now.Sub(a.lastPostAttempt) >= reportInterval
 }
 
 func (a *Agent) buildReportBody(m Metrics, reportAt time.Time) ([]byte, int, error) {
@@ -971,6 +997,7 @@ func (a *Agent) applyRemoteConfigWithOptions(body []byte, headers http.Header, a
 		a.lastSample = time.Time{}
 		a.lastReport = time.Time{}
 		a.lastPost = time.Time{}
+		a.lastPostAttempt = time.Time{}
 		a.lastConfigStateReportAt = time.Time{}
 		a.lastConfigStateReportMD5 = ""
 		if a.reporter != nil {

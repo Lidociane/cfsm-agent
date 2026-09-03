@@ -343,6 +343,53 @@ func TestReportTransportProtocolDelayPausesPostFallback(t *testing.T) {
 	}
 }
 
+func TestPostFallbackFailureIsRateLimitedByReportInterval(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	agent := Agent{
+		cfg: Config{
+			ServerID:       "sid",
+			Secret:         "secret",
+			WorkerURL:      server.URL,
+			ReportInterval: 60,
+		},
+		log: newLogger(false),
+	}
+
+	result := agent.sendReport(agent.cfg, Metrics{CPU: "1.23", BootTime: "0"}, false, true, time.Minute)
+	if result.ok {
+		t.Fatal("sendReport succeeded on HTTP 503")
+	}
+	if requests != 1 {
+		t.Fatalf("requests after first attempt = %d, want 1", requests)
+	}
+	if agent.lastPostAttempt.IsZero() {
+		t.Fatal("lastPostAttempt was not recorded")
+	}
+
+	result = agent.sendReport(agent.cfg, Metrics{CPU: "1.23", BootTime: "0"}, false, true, time.Minute)
+	if result.ok {
+		t.Fatal("sendReport succeeded during retry throttle")
+	}
+	if requests != 1 {
+		t.Fatalf("requests during retry throttle = %d, want 1", requests)
+	}
+
+	agent.lastPostAttempt = time.Now().Add(-time.Minute)
+	result = agent.sendReport(agent.cfg, Metrics{CPU: "1.23", BootTime: "0"}, false, true, time.Minute)
+	if result.ok {
+		t.Fatal("sendReport succeeded on second HTTP 503")
+	}
+	if requests != 2 {
+		t.Fatalf("requests after retry interval = %d, want 2", requests)
+	}
+}
+
 func TestReportTransportStopWakesRetrySleep(t *testing.T) {
 	transport := &reportTransport{
 		agent: &Agent{log: newLogger(false)},
@@ -358,6 +405,18 @@ func TestReportTransportStopWakesRetrySleep(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("stop did not wake WSS retry sleep")
+	}
+}
+
+func TestReportTransportReadIdleTimeoutTracksWSSInterval(t *testing.T) {
+	transport := &reportTransport{}
+	if got := transport.readIdleTimeout(); got != 17*time.Second {
+		t.Fatalf("default readIdleTimeout = %s, want 17s", got)
+	}
+
+	transport.setNextReportAfterMs(int64(time.Minute / time.Millisecond))
+	if got := transport.readIdleTimeout(); got != 75*time.Second {
+		t.Fatalf("minute readIdleTimeout = %s, want 75s", got)
 	}
 }
 
