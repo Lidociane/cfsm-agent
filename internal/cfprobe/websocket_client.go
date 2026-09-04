@@ -101,6 +101,8 @@ func dialReportWebSocket(ctx context.Context, rawURL string, headers http.Header
 	if err != nil {
 		return nil, nil, started, time.Now(), err
 	}
+	deadline := started.Add(timeout)
+	_ = conn.SetDeadline(deadline)
 	if scheme == "wss" {
 		tlsConn := tls.Client(conn, &tls.Config{
 			ServerName: host,
@@ -111,6 +113,7 @@ func dialReportWebSocket(ctx context.Context, rawURL string, headers http.Header
 			return nil, nil, started, time.Now(), err
 		}
 		conn = tlsConn
+		_ = conn.SetDeadline(deadline)
 	}
 
 	key, err := newWebSocketKey()
@@ -163,6 +166,7 @@ func dialReportWebSocket(ctx context.Context, rawURL string, headers http.Header
 		_ = conn.Close()
 		return nil, resp.Header, started, received, fmt.Errorf("WSS handshake invalid accept")
 	}
+	_ = conn.SetDeadline(time.Time{})
 	return &webSocketConn{conn: conn, reader: reader}, resp.Header, started, received, nil
 }
 
