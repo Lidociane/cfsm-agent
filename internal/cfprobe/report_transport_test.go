@@ -572,6 +572,64 @@ func TestWSSScheduleInactiveHandshakeIsSoftReject(t *testing.T) {
 	}
 }
 
+func TestAgentWSSDisabledHeaderDisablesWSS(t *testing.T) {
+	agent := Agent{
+		cfg: Config{ConnectionMode: connectionModeAuto},
+		log: newLogger(false),
+	}
+	agent.handleWSSRuntimeHeaders(http.Header{
+		"X-Agent-Wss-Mode":   []string{"disabled"},
+		"X-Agent-Wss-Reason": []string{"wss_disabled"},
+	})
+	if agent.usesWSS() {
+		t.Fatal("usesWSS() = true after disabled WSS header")
+	}
+	agent.handleWSSRuntimeHeaders(http.Header{
+		"X-Agent-Wss-Mode":   []string{"active"},
+		"X-Agent-Wss-Reason": []string{"wss_schedule_active"},
+	})
+	if !agent.usesWSS() {
+		t.Fatal("usesWSS() = false after active header")
+	}
+}
+
+func TestWSSDisabledHandshakeIsSoftReject(t *testing.T) {
+	reason, ok := wssScheduleInactiveFromHandshake(&wsHandshakeError{
+		StatusCode: http.StatusConflict,
+		Body:       `{"text":"wss_disabled","connection_mode":"http"}`,
+	})
+	if !ok || reason != agentWSSScheduleDisabled {
+		t.Fatalf("wssScheduleInactiveFromHandshake() = %q, %v", reason, ok)
+	}
+
+	reason, ok = wssScheduleInactiveFromHandshake(&wsHandshakeError{
+		StatusCode: http.StatusConflict,
+		Headers: http.Header{
+			"X-Agent-Wss-Mode":   []string{"disabled"},
+			"X-Agent-Wss-Reason": []string{"wss_disabled"},
+		},
+	})
+	if !ok || reason != agentWSSScheduleDisabled {
+		t.Fatalf("header wssScheduleInactiveFromHandshake() = %q, %v", reason, ok)
+	}
+
+	reason, ok = wssScheduleInactiveFromFrame(wsServerFrame{
+		Code: http.StatusConflict,
+		Text: agentWSSScheduleDisabled,
+	})
+	if !ok || reason != agentWSSScheduleDisabled {
+		t.Fatalf("frame wssScheduleInactiveFromFrame() = %q, %v", reason, ok)
+	}
+
+	_, ok = wssScheduleInactiveFromHandshake(&wsHandshakeError{
+		StatusCode: http.StatusForbidden,
+		Body:       `{"error":"Agent WSS report disabled","code":403}`,
+	})
+	if ok {
+		t.Fatal("bare 403 disabled body must not be treated as soft reject")
+	}
+}
+
 func TestReportTransportUsesServerSuggestedWSSReportInterval(t *testing.T) {
 	agent := Agent{
 		cfg: Config{ReportInterval: 60},

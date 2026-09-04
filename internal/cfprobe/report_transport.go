@@ -434,7 +434,7 @@ func (r *reportTransport) readLoop(ctx context.Context, conn *webSocketConn) err
 		case "error":
 			reason := firstNonEmpty(frame.Error, "server_error")
 			if scheduleReason, ok := wssScheduleInactiveFromFrame(frame); ok {
-				r.agent.log.info("WSS schedule inactive ts=%d reason=%s", frame.TS, scheduleReason)
+				r.agent.log.info("WSS unavailable ts=%d reason=%s", frame.TS, scheduleReason)
 				r.agent.disableWSSRuntime(scheduleReason)
 				return &wsScheduleInactiveError{reason: scheduleReason}
 			}
@@ -737,7 +737,7 @@ func (r *reportTransport) handleConnectionError(ctx context.Context, err error, 
 	}
 	var closeErr *wsCloseError
 	if errors.As(err, &closeErr) && closeErr.Code == 1013 && isWSSScheduleInactiveReason(closeErr.Reason) {
-		r.agent.log.info("WSS schedule inactive close reason=%s", closeErr.Reason)
+		r.agent.log.info("WSS unavailable close reason=%s", closeErr.Reason)
 		r.agent.disableWSSRuntime(closeErr.Reason)
 		return false
 	}
@@ -784,7 +784,7 @@ func isAuthConfigHTTPStatus(statusCode int) bool {
 
 func isWSSScheduleInactiveReason(reason string) bool {
 	reason = strings.ToLower(strings.TrimSpace(reason))
-	return reason == agentWSSScheduleInactive || reason == agentWSSScheduleEmpty
+	return reason == agentWSSScheduleInactive || reason == agentWSSScheduleEmpty || reason == agentWSSScheduleDisabled
 }
 
 func wssScheduleInactiveFromHandshake(err *wsHandshakeError) (string, bool) {
@@ -814,7 +814,7 @@ func wssScheduleInactiveFromHeaders(headers http.Header) (string, bool) {
 		return "", false
 	}
 	mode := strings.ToLower(strings.TrimSpace(headers.Get(agentWSSModeHeader)))
-	if mode != "" && mode != agentWSSModeInactive {
+	if mode != "" && mode != agentWSSModeInactive && mode != agentWSSModeDisabled {
 		return "", false
 	}
 	reason := strings.ToLower(strings.TrimSpace(headers.Get(agentWSSReasonHeader)))

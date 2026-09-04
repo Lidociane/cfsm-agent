@@ -58,6 +58,8 @@ type Agent struct {
 }
 
 const (
+	agentWSSModeDisabled          = "disabled"
+	agentWSSScheduleDisabled      = "wss_disabled"
 	metricsProbeInterval          = 10 * time.Second
 	metricsProbeMedianWindow      = time.Minute
 	metricsProbeWindowSampleCount = 6
@@ -388,7 +390,11 @@ func (a *Agent) handleWSSRuntimeHeaders(headers http.Header) {
 	case agentWSSModeActive:
 		a.clearWSSRuntimeDisabled(reason)
 	case agentWSSModeInactive:
-		if reason == agentWSSScheduleInactive || reason == agentWSSScheduleEmpty {
+		if isWSSScheduleInactiveReason(reason) {
+			a.disableWSSRuntime(reason)
+		}
+	case agentWSSModeDisabled:
+		if isWSSScheduleInactiveReason(reason) {
 			a.disableWSSRuntime(reason)
 		}
 	}
