@@ -4,17 +4,16 @@ name: Fork Sync
 # 1. 把客户端安装/自升级脚本里的下载地址从上游仓库改写为本 fork 仓库
 # 2. 若上游发布了新的正式版本(tag),则以同步后的代码自动创建同号正式版 Release
 #
-# 说明: GITHUB_TOKEN 的推送和 gh release create 不会触发其他 workflow,
+# GITHUB_TOKEN 的推送和 gh release create 不会触发其他 workflow,
 # 因此改写、构建、发 Release 必须在本 workflow 内一次性完成。
-# 定时任务仅作为 "Sync fork 未触发 push 事件" 时的兜底。
+# 仅由 GitHub Web 上的 "Sync fork" 按钮 (push to main) 触发,
+# 以及必要时通过 workflow_dispatch 手动触发。
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
-  schedule:
-    - cron: "0 * * * *"
 
 permissions:
   contents: write
@@ -43,8 +42,8 @@ jobs:
         run: |
           set -euo pipefail
           # 不删除 snapshot.yml(避免上游再次修改该文件时 Sync fork 产生 delete/modify 冲突),
-          # 改为通过 API 永久禁用, 并取消 Sync 时已被触发的运行。
-          # 本步骤每次运行都会执行(含每小时 cron 兜底), 即使被自动重新启用也会在 1 小时内再次禁用。
+          # 改为通过 API 永久禁用, 并取消已被触发的运行。
+          # 本步骤每次运行都会执行, 即使被自动重新启用也会立即再次禁用。
           wf_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows" \
             --jq '.workflows[] | select(.path == ".github/workflows/snapshot.yml" or .name == "Publish Snapshot") | .id' \
             | head -n 1 || true)"
