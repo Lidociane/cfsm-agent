@@ -340,25 +340,44 @@ func readDiskIOCounters(_ []DiskDeviceRef) DiskIOCounters {
 
 func darwinMemoryMB() (uint64, uint64) {
 	total := parseFirstUint(commandOutput("sysctl", "-n", "hw.memsize")) / 1024 / 1024
-	pageSize := uint64(4096)
 	out := commandOutput("vm_stat")
-	var freePages uint64
+	pageSize := uint64(0)
+	var freePages, inactivePages, speculativePages uint64
 	for _, line := range strings.Split(out, "\n") {
+		if pageSize == 0 {
+			if _, value, ok := strings.Cut(line, "page size of "); ok {
+				pageSize = parseFirstUint(value)
+			}
+		}
 		clean := strings.ReplaceAll(line, ".", "")
-		_, v, ok := strings.Cut(clean, ":")
+		label, v, ok := strings.Cut(clean, ":")
 		if !ok {
 			continue
 		}
 		pages := parseFirstUint(v)
-		if strings.Contains(line, "Pages free") || strings.Contains(line, "Pages inactive") || strings.Contains(line, "Pages speculative") {
-			freePages += pages
+		switch strings.TrimSpace(label) {
+		case "Pages free":
+			freePages = pages
+		case "Pages inactive":
+			inactivePages = pages
+		case "Pages speculative":
+			speculativePages = pages
 		}
 	}
-	freeMB := freePages * pageSize / 1024 / 1024
-	if total < freeMB {
+	if pageSize == 0 {
+		pageSize = parseFirstUint(commandOutput("sysctl", "-n", "hw.pagesize"))
+	}
+	if pageSize == 0 {
+		pageSize = 4096
+	}
+
+	// Preserve the existing available-memory estimate while using the actual VM page size.
+	availablePages := freePages + inactivePages + speculativePages
+	availableMB := availablePages * pageSize / 1024 / 1024
+	if total < availableMB {
 		return total, 0
 	}
-	return total, total - freeMB
+	return total, total - availableMB
 }
 
 func darwinDiskUsage(path string) (uint64, uint64) {
