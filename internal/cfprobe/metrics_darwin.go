@@ -342,8 +342,7 @@ func darwinMemoryMB() (uint64, uint64) {
 	total := parseFirstUint(commandOutput("sysctl", "-n", "hw.memsize")) / 1024 / 1024
 	out := commandOutput("vm_stat")
 	pageSize := uint64(0)
-	var freePages, inactivePages, speculativePages, fileBackedPages uint64
-	hasFileBackedPages := false
+	var freePages, inactivePages, speculativePages uint64
 	for _, line := range strings.Split(out, "\n") {
 		if pageSize == 0 {
 			if _, value, ok := strings.Cut(line, "page size of "); ok {
@@ -363,9 +362,6 @@ func darwinMemoryMB() (uint64, uint64) {
 			inactivePages = pages
 		case "Pages speculative":
 			speculativePages = pages
-		case "File-backed pages":
-			fileBackedPages = pages
-			hasFileBackedPages = true
 		}
 	}
 	if pageSize == 0 {
@@ -375,11 +371,8 @@ func darwinMemoryMB() (uint64, uint64) {
 		pageSize = 4096
 	}
 
-	// Use the actual VM page size and count file-backed cache as reclaimable, matching macOS memory reporting.
+	// Preserve the existing available-memory estimate while using the actual VM page size.
 	availablePages := freePages + inactivePages + speculativePages
-	if hasFileBackedPages && freePages >= speculativePages {
-		availablePages = freePages - speculativePages + fileBackedPages
-	}
 	availableMB := availablePages * pageSize / 1024 / 1024
 	if total < availableMB {
 		return total, 0
